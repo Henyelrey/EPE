@@ -112,11 +112,20 @@ La caché ocupa como máximo `max_disk_bytes` (por defecto 10 GiB; `0` = sin lí
 
 El proxy abre un puerto de administración en `admin_listen` (por defecto `127.0.0.1:9128`; vacío lo desactiva). Si no puede abrirlo, no arranca.
 
-Abre `http://127.0.0.1:9128/` y pega el token. El panel muestra la descarga evitada, los ratios, el reparto de peticiones, el disco y las alertas, y se actualiza cada 5 segundos.
+Abre `http://127.0.0.1:9128/` y pega el token. La barra lateral tiene dos vistas: **Resumen**, con la descarga evitada, los ratios, el reparto de peticiones, el disco y las alertas, que se actualiza cada 5 segundos, y **Registro en vivo**, que se actualiza cada 3 segundos.
 
 Sin token, la página se sirve vacía: **todos los datos lo exigen**. El token se crea al arrancar en `admin_token_file` (`ca/admin.token`), con acceso solo para el usuario que ejecuta el proxy. Para cambiarlo, bórralo y reinicia. El panel lo guarda solo en esa pestaña y lo olvida al pulsar «Salir». Si escuchas fuera de `127.0.0.1`, el token viaja sin cifrar por esa red: el proxy lo advierte al arrancar.
 
 **Por cliente.** Con `client_stats_enabled = true`, el panel lista cada IP con sus peticiones, bytes, túneles y rechazos, pero no qué sitios visitó. Viene apagado porque son datos sobre personas, y el aviso de `http://rayo.aviso/` indica si está activo. Solo vive en memoria y se olvida tras un día sin actividad o al reiniciar. Guarda hasta 4096 clientes: los que no quepan no se cuentan hasta que se olvide alguno.
+
+**Registro en vivo.** Una gráfica de tráfico de los últimos 5 minutos y una tabla con las últimas peticiones, que se puede filtrar y pausar.
+
+- La gráfica está siempre disponible, porque solo usa totales generales. No incluye las conexiones sin descifrar: el proxy no conoce su tamaño.
+- La tabla se activa con `live_log_enabled = true`. Viene apagada porque muestra qué dominios pide cada equipo, y el aviso de `http://rayo.aviso/` indica si está activa.
+- `live_log_client` decide cómo aparece el cliente: `"pseudonym"` (por defecto), un identificador que cambia cada día; `"ip"`, su IP real; o `"none"`, nada.
+- Guarda las últimas 1000 entradas solo en memoria, y se olvidan tras un día o al reiniciar. Como en el log de acceso, nunca hay parámetros de la dirección, y la ruta solo aparece en contenido servido desde una copia o guardado.
+
+Si usas `"ip"` en una red compartida, revisa con quien corresponda si puedes mostrar esa relación entre equipos y sitios, y actualiza `docs/AVISO.md`.
 
 ### Alertas
 
@@ -185,6 +194,26 @@ Además de los contadores de arriba, `/metrics` incluye lo que no se publica en 
 | `rayo_alert{name}`, `rayo_ca_not_after_seconds` | Si cada alerta está activa, y cuándo vence la CA. |
 | `rayo_access_log_dropped_total`, `rayo_access_log_errors_total` | Líneas perdidas del log de acceso y errores al escribirlo. |
 | `rayo_uptime_seconds` | Tiempo desde el arranque. |
+
+### Log de seguridad para un SIEM
+
+Con `security_log_enabled = true`, el proxy escribe `security-AAAA-MM-DD.jsonl` en `security_log_dir` y lo conserva `security_log_retention_days` días (30 por defecto). Viene apagado porque guarda la IP real, y el aviso de `http://rayo.aviso/` indica si está activo.
+
+| `event` | Qué ocurrió |
+|---|---|
+| `startup`, `shutdown` | El proxy arrancó o se detuvo de forma ordenada |
+| `client_denied` | Una IP fuera de `allowed_clients` intentó usarlo |
+| `rate_limited` | Una IP superó `rate_limit_per_minute` |
+| `port_blocked` | Un túnel a un puerto fuera de `allowed_connect_ports` |
+| `destination_blocked` | Una petición a la red interna o a metadatos de la nube |
+| `admin_auth_failed` | Token ausente (`missing`) o incorrecto (`invalid`) en el puerto de administración |
+| `detection` | Volumen alto, muchos rechazos o nombre que no coincide |
+| `alert_raised`, `alert_resolved` | Cambió una alerta del panel, como objetos corruptos |
+| `security_log_throttled` | Un evento de una IP llegó al tope de 120 líneas por minuto: las siguientes se descartan |
+
+La navegación normal no pasa por este log. Nunca incluye tokens, parámetros de la dirección, cookies ni cuerpos. El tope evita que un atacante llene el disco a base de rechazos.
+
+Para verlo en Wazuh, con reglas y simulaciones de ataque, consulta [`siem/README.md`](siem/README.md).
 
 ### Log de acceso
 

@@ -2,6 +2,8 @@ target/
 data/
 ca/
 logs/
+siem/demo/
+siem/wazuh-docker/
 config.toml
 e2e/data-*/
 e2e/logs*/

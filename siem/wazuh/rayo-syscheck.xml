@@ -1,0 +1,9 @@
+  <syscheck>
+    <disabled>no</disabled>
+    <frequency>30</frequency>
+    <scan_on_start>yes</scan_on_start>
+    <alert_new_files>yes</alert_new_files>
+    <directories check_all="yes">/var/rayo/ca</directories>
+    <directories check_all="yes">/var/rayo/config.toml</directories>
+    <directories check_all="yes">/var/rayo/data/objects</directories>
+  </syscheck>

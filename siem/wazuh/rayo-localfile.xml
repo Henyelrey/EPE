@@ -1,0 +1,7 @@
+<ossec_config>
+  <localfile>
+    <log_format>json</log_format>
+    <location>/var/rayo/logs/security-*.jsonl</location>
+    <only-future-events>no</only-future-events>
+  </localfile>
+</ossec_config>

@@ -1,2 +1,4 @@
 # Los scripts de bash no funcionan con finales de línea CRLF, aunque se clonen en Windows.
 *.sh text eol=lf
+# Wazuh lee estas reglas dentro de un contenedor Linux.
+siem/wazuh/* text eol=lf

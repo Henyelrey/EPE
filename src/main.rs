@@ -13,11 +13,13 @@ mod coalesce;
 mod config;
 mod detect;
 mod handler;
+mod live;
 mod memory;
 mod monitor;
 mod notice;
 mod policy;
 mod secure;
+mod security;
 mod stats;
 mod store;
 mod upstream;
@@ -78,6 +80,16 @@ async fn main() -> anyhow::Result<()> {
     if cfg.detections_enabled {
         tracing::info!("detecciones de actividad inusual activas, solo en memoria. El aviso a los usuarios lo indica.");
     }
+    if cfg.live_log_enabled {
+        tracing::info!("registro en vivo activo, solo en memoria. El aviso a los usuarios lo indica.");
+    }
+    if cfg.security_log_enabled {
+        tracing::info!(
+            "log de seguridad activo en {}, se conserva {} día(s). El aviso a los usuarios lo indica.",
+            cfg.security_log_dir.display(),
+            cfg.security_log_retention_days
+        );
+    }
     if cfg.allowed_connect_ports.is_empty() {
         tracing::warn!("allowed_connect_ports está vacío: los clientes pueden abrir túneles a cualquier puerto público.");
     }
@@ -86,22 +98,28 @@ async fn main() -> anyhow::Result<()> {
     }
 
     let access_log = access_log::AccessLog::start(&cfg, stats.clone())?;
+    let security = Arc::new(security::SecurityLog::start(&cfg, stats.clone())?);
+    let started = format!("Escucha en {addr}; descifra {} dominio(s).", cfg.intercept_domains.len());
+    security.record(security::SecurityEvent { event: "startup", detail: Some(&started), ..Default::default() });
     let client_stats = Arc::new(clients::ClientStats::new(cfg.client_stats_enabled));
     let limits = detect::Limits {
         requests_per_minute: cfg.detect_requests_per_minute,
         bytes_per_minute: cfg.detect_bytes_per_minute,
         denied_per_minute: cfg.detect_denied_per_minute,
     };
-    let detector = Arc::new(detect::Detector::new(cfg.detections_enabled, limits, stats.clone()));
-    let health = Arc::new(monitor::Monitor::new(ca_summary.not_after));
-    admin::start(&cfg, stats.clone(), health.clone(), client_stats.clone(), detector.clone()).await?;
+    let detector = Arc::new(detect::Detector::new(cfg.detections_enabled, limits, stats.clone()).with_security_log(security.clone()));
+    let health = Arc::new(monitor::Monitor::new(ca_summary.not_after).with_security_log(security.clone()));
+    let live_log = Arc::new(live::LiveLog::new(cfg.live_log_enabled, cfg.live_log_client));
+    let traffic = Arc::new(live::Traffic::default());
+    admin::start(&cfg, stats.clone(), health.clone(), client_stats.clone(), detector.clone(), live_log.clone(), traffic.clone(), security.clone()).await?;
+    live::start(stats.clone(), live_log.clone(), traffic);
     monitor::start(&cfg, stats.clone(), client_stats.clone(), detector.clone(), health);
 
     let data_dir = cfg.data_dir.clone();
     let final_stats = stats.clone();
     let memory = memory::MemoryBudget::new(cfg.max_buffered_bytes);
     let flights = coalesce::Flights::new(cfg.coalesce_wait_secs);
-    let shared = Arc::new(Shared { cfg, store, stats, normalizer, clients, destinations, memory, flights, access_log, client_stats, detector, notice });
+    let shared = Arc::new(Shared { cfg, store, stats, normalizer, clients, destinations, memory, flights, access_log, client_stats, detector, live_log, security: security.clone(), notice });
 
     let proxy = Proxy::builder()
         .with_addr(addr)
@@ -114,6 +132,9 @@ async fn main() -> anyhow::Result<()> {
         .build()?;
 
     let result = proxy.start().await;
+    security.record(security::SecurityEvent { event: "shutdown", ..Default::default() });
+    // La línea se escribe en otra tarea: se le da tiempo antes de salir.
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
     monitor::save_stats(&data_dir, &final_stats).await;
     result?;
     Ok(())

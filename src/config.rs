@@ -80,6 +80,18 @@ pub struct Config {
     pub detect_bytes_per_minute: u64,
     /// Respuestas 403 o 404, del origen o del propio proxy.
     pub detect_denied_per_minute: u64,
+    /// Registro en vivo en el panel: últimas peticiones con su dominio, solo en memoria y visibles
+    /// solo con el token. Apagado por defecto: muestra qué pide cada equipo. El aviso indica si está activo.
+    pub live_log_enabled: bool,
+    /// Cómo aparece el cliente en el registro en vivo: seudónimo diario, IP o nada.
+    pub live_log_client: LiveClientMode,
+    /// Log de eventos de seguridad para un SIEM: rechazos, tokens fallidos, detecciones y alertas, con
+    /// la IP real. Apagado por defecto. El aviso de transparencia indica si está activo.
+    pub security_log_enabled: bool,
+    /// Carpeta del log de seguridad: un archivo por día.
+    pub security_log_dir: PathBuf,
+    /// Días que se conserva el log de seguridad, contando el de hoy.
+    pub security_log_retention_days: u64,
     /// Log de acceso por petición. Apagado por defecto: registra actividad de personas, y
     /// activarlo debe ser una decisión deliberada. El aviso de transparencia indica si está activo.
     pub access_log_enabled: bool,
@@ -96,6 +108,17 @@ pub struct Config {
 pub enum ClientIpMode {
     /// Identificador calculado con una clave que cambia cada día y solo vive en memoria.
     Pseudonym,
+    /// Nada que permita distinguir a un cliente de otro.
+    None,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum LiveClientMode {
+    /// Identificador calculado con una clave que cambia cada día y solo vive en memoria.
+    Pseudonym,
+    /// La IP real. Permite ver qué dominios pide cada equipo identificado.
+    Ip,
     /// Nada que permita distinguir a un cliente de otro.
     None,
 }
@@ -167,6 +190,11 @@ impl Default for Config {
             detect_requests_per_minute: 3000,
             detect_bytes_per_minute: 1024 * 1024 * 1024,
             detect_denied_per_minute: 100,
+            live_log_enabled: false,
+            live_log_client: LiveClientMode::Pseudonym,
+            security_log_enabled: false,
+            security_log_dir: "./logs".into(),
+            security_log_retention_days: 30,
             access_log_enabled: false,
             access_log_dir: "./logs".into(),
             access_log_retention_days: 7,

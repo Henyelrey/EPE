@@ -1,0 +1,211 @@
+<!--
+  Reglas de Wazuh para el log de seguridad de rayo-cache y para los archivos críticos de la demo.
+  Nivel: 3 informativo, 5-8 sospechoso, 10-14 ataque probable.
+  Las reglas de frecuencia agrupan por IP de origen: un intento suelto es ruido, una ráfaga es un ataque.
+-->
+<group name="rayo,">
+
+  <rule id="100100" level="0">
+    <decoded_as>json</decoded_as>
+    <field name="app">^rayo-cache$</field>
+    <description>rayo-cache: evento de seguridad</description>
+  </rule>
+
+  <!-- Ciclo de vida -->
+  <rule id="100101" level="3">
+    <if_sid>100100</if_sid>
+    <field name="event">^startup$</field>
+    <description>rayo-cache: el proxy arrancó</description>
+    <group>service_start,</group>
+  </rule>
+
+  <rule id="100102" level="5">
+    <if_sid>100100</if_sid>
+    <field name="event">^shutdown$</field>
+    <description>rayo-cache: el proxy se detuvo</description>
+    <group>service_stop,</group>
+  </rule>
+
+  <!-- Clientes no autorizados -->
+  <rule id="100110" level="5">
+    <if_sid>100100</if_sid>
+    <field name="event">^client_denied$</field>
+    <description>rayo-cache: cliente no autorizado desde $(srcip)</description>
+    <mitre><id>T1133</id></mitre>
+    <group>access_denied,</group>
+  </rule>
+
+  <rule id="100111" level="10" frequency="5" timeframe="60" ignore="60">
+    <if_matched_sid>100110</if_matched_sid>
+    <same_srcip />
+    <description>rayo-cache: insistencia de un cliente no autorizado desde $(srcip)</description>
+    <mitre><id>T1133</id></mitre>
+    <group>access_denied,attack,</group>
+  </rule>
+
+  <!-- Puerto de administración -->
+  <rule id="100120" level="5">
+    <if_sid>100100</if_sid>
+    <field name="event">^admin_auth_failed$</field>
+    <description>rayo-cache: token de administración rechazado desde $(srcip)</description>
+    <mitre><id>T1110</id></mitre>
+    <group>authentication_failed,</group>
+  </rule>
+
+  <rule id="100121" level="12" frequency="5" timeframe="60" ignore="60">
+    <if_matched_sid>100120</if_matched_sid>
+    <same_srcip />
+    <description>rayo-cache: fuerza bruta contra el token de administración desde $(srcip)</description>
+    <mitre><id>T1110.001</id></mitre>
+    <group>authentication_failures,attack,</group>
+  </rule>
+
+  <!-- Escaneo de puertos a través del proxy -->
+  <rule id="100130" level="5">
+    <if_sid>100100</if_sid>
+    <field name="event">^port_blocked$</field>
+    <description>rayo-cache: túnel bloqueado al puerto $(dstport) de $(host), desde $(srcip)</description>
+    <mitre><id>T1046</id></mitre>
+    <group>access_denied,</group>
+  </rule>
+
+  <rule id="100131" level="10" frequency="4" timeframe="60" ignore="60">
+    <if_matched_sid>100130</if_matched_sid>
+    <same_srcip />
+    <description>rayo-cache: escaneo de puertos a través del proxy desde $(srcip)</description>
+    <mitre><id>T1046</id></mitre>
+    <group>recon,attack,</group>
+  </rule>
+
+  <!-- SSRF: usar el proxy para llegar a la red interna -->
+  <rule id="100140" level="7">
+    <if_sid>100100</if_sid>
+    <field name="event">^destination_blocked$</field>
+    <description>rayo-cache: intento de llegar a la red interna ($(dstip)) desde $(srcip)</description>
+    <mitre><id>T1090</id></mitre>
+    <group>access_denied,ssrf,</group>
+  </rule>
+
+  <rule id="100141" level="12">
+    <if_sid>100140</if_sid>
+    <dstip>169.254.169.254</dstip>
+    <description>rayo-cache: intento de leer los metadatos de la nube desde $(srcip)</description>
+    <mitre><id>T1552.005</id></mitre>
+    <group>access_denied,ssrf,attack,</group>
+  </rule>
+
+  <!-- Inundación -->
+  <rule id="100150" level="5">
+    <if_sid>100100</if_sid>
+    <field name="event">^rate_limited$</field>
+    <description>rayo-cache: límite de peticiones superado por $(srcip)</description>
+    <mitre><id>T1499</id></mitre>
+    <group>flood,</group>
+  </rule>
+
+  <rule id="100151" level="10" frequency="20" timeframe="60" ignore="60">
+    <if_matched_sid>100150</if_matched_sid>
+    <same_srcip />
+    <description>rayo-cache: inundación de peticiones desde $(srcip)</description>
+    <mitre><id>T1499</id></mitre>
+    <group>flood,attack,</group>
+  </rule>
+
+  <rule id="100152" level="8">
+    <if_sid>100100</if_sid>
+    <field name="event">^security_log_throttled$</field>
+    <description>rayo-cache: el log de seguridad descarta líneas de $(reason) desde $(srcip)</description>
+    <mitre><id>T1562.006</id></mitre>
+    <group>flood,</group>
+  </rule>
+
+  <!-- Detecciones del propio proxy -->
+  <rule id="100160" level="8">
+    <if_sid>100100</if_sid>
+    <field name="event">^detection$</field>
+    <field name="reason">^host_mismatch$</field>
+    <description>rayo-cache: el nombre declarado no coincide con el destino, desde $(srcip)</description>
+    <mitre><id>T1090.004</id></mitre>
+    <group>evasion,</group>
+  </rule>
+
+  <rule id="100161" level="6">
+    <if_sid>100100</if_sid>
+    <field name="event">^detection$</field>
+    <field name="reason">^denied$</field>
+    <description>rayo-cache: muchas respuestas 403 o 404 para $(srcip)</description>
+    <mitre><id>T1595</id></mitre>
+    <group>recon,</group>
+  </rule>
+
+  <rule id="100162" level="7">
+    <if_sid>100100</if_sid>
+    <field name="event">^detection$</field>
+    <field name="reason">^volume$</field>
+    <description>rayo-cache: volumen inusual de tráfico de $(srcip)</description>
+    <mitre><id>T1048</id></mitre>
+    <group>exfiltration,</group>
+  </rule>
+
+  <!-- Alertas del panel -->
+  <rule id="100170" level="5">
+    <if_sid>100100</if_sid>
+    <field name="event">^alert_raised$</field>
+    <description>rayo-cache: alerta del panel: $(reason)</description>
+  </rule>
+
+  <rule id="100171" level="13">
+    <if_sid>100170</if_sid>
+    <field name="reason">^corrupt_objects$</field>
+    <description>rayo-cache: objeto de la caché alterado, posible envenenamiento</description>
+    <mitre><id>T1565.001</id></mitre>
+    <group>tampering,attack,</group>
+  </rule>
+
+  <rule id="100172" level="3">
+    <if_sid>100100</if_sid>
+    <field name="event">^alert_resolved$</field>
+    <description>rayo-cache: alerta del panel resuelta: $(reason)</description>
+  </rule>
+
+  <!-- Integridad de archivos críticos: 550 cambió, 553 se borró, 554 apareció -->
+  <rule id="100180" level="14">
+    <if_sid>550,553</if_sid>
+    <field name="file">rayo-ca.key$</field>
+    <description>rayo-cache: la clave de la CA fue modificada o borrada</description>
+    <mitre><id>T1552.004</id></mitre>
+    <group>syscheck,tampering,attack,</group>
+  </rule>
+
+  <rule id="100181" level="12">
+    <if_sid>550,553</if_sid>
+    <field name="file">rayo-ca.crt$</field>
+    <description>rayo-cache: el certificado de la CA fue modificado o borrado</description>
+    <mitre><id>T1553.004</id></mitre>
+    <group>syscheck,tampering,attack,</group>
+  </rule>
+
+  <rule id="100182" level="10">
+    <if_sid>550,553</if_sid>
+    <field name="file">config.toml$</field>
+    <description>rayo-cache: la configuración del proxy fue modificada</description>
+    <mitre><id>T1562.001</id></mitre>
+    <group>syscheck,tampering,</group>
+  </rule>
+
+  <!-- Es normal que el proxy guarde objetos nuevos. -->
+  <rule id="100184" level="0">
+    <if_sid>554</if_sid>
+    <field name="file">/var/rayo/data/objects/</field>
+    <description>rayo-cache: objeto nuevo en la caché</description>
+  </rule>
+
+  <rule id="100183" level="12">
+    <if_sid>550</if_sid>
+    <field name="file">/var/rayo/data/objects/</field>
+    <description>rayo-cache: un objeto de la caché cambió en disco</description>
+    <mitre><id>T1565.001</id></mitre>
+    <group>syscheck,tampering,attack,</group>
+  </rule>
+
+</group>

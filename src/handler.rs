@@ -6,8 +6,10 @@ use crate::clients::ClientStats;
 use crate::coalesce::{Entry, FlightGuard, Flights};
 use crate::config::{canonical_host, Config};
 use crate::detect::Detector;
+use crate::live::LiveLog;
 use crate::memory::{MemoryBudget, Reservation};
 use crate::policy::{self, AbsUrl, KeyNormalizer};
+use crate::security::{SecurityEvent, SecurityLog};
 use crate::stats::{Outcome, Stats};
 use crate::store::{now, Meta, PutOutcome, Store};
 use bytes::{Bytes, BytesMut};
@@ -34,6 +36,8 @@ pub struct Shared {
     pub access_log: AccessLog,
     pub client_stats: Arc<ClientStats>,
     pub detector: Arc<Detector>,
+    pub live_log: Arc<LiveLog>,
+    pub security: Arc<SecurityLog>,
     /// Página de http://rayo.aviso/, generada al arrancar.
     pub notice: Bytes,
 }
@@ -65,7 +69,7 @@ impl RequestInfo {
     fn log(&self, sh: &Shared, outcome: Outcome, status: Option<u16>, bytes: Option<u64>, elapsed: Duration) {
         sh.client_stats.record(self.client, outcome, bytes);
         sh.detector.observe(self.client, status, bytes);
-        sh.access_log.record(Record {
+        let record = Record {
             client: self.client,
             method: self.method.as_str(),
             scheme: self.scheme.as_deref(),
@@ -76,7 +80,9 @@ impl RequestInfo {
             status,
             bytes,
             elapsed,
-        });
+        };
+        sh.live_log.record(&record);
+        sh.access_log.record(record);
     }
 
     /// Mide y registra una petición que ya terminó o cuyo tamaño ya se conoce.
@@ -241,6 +247,7 @@ impl CacheHandler {
             Stats::inc(&sh.stats.blocked_ports);
             tracing::debug!(host, port, "CONNECT a un puerto no permitido");
             sh.detector.rare_port(client, port);
+            sh.security.record(SecurityEvent { event: "port_blocked", srcip: Some(client), host: Some(host), port: Some(port), ..Default::default() });
             info.finish(sh, Outcome::Blocked, Some(403), None);
             return empty_response(StatusCode::FORBIDDEN).into();
         }
@@ -249,6 +256,7 @@ impl CacheHandler {
             Err(ResolveError::Blocked(ip)) => {
                 Stats::inc(&sh.stats.blocked_destinations);
                 tracing::debug!(host, %ip, "CONNECT a destino interno bloqueado");
+                sh.security.record(SecurityEvent { event: "destination_blocked", srcip: Some(client), dstip: Some(ip), host: Some(host), port: Some(port), ..Default::default() });
                 info.finish(sh, Outcome::Blocked, Some(403), None);
                 return empty_response(StatusCode::FORBIDDEN).into();
             }
@@ -331,6 +339,7 @@ impl HttpHandler for CacheHandler {
             ClientDecision::Denied => {
                 Stats::inc(&sh.stats.denied_clients);
                 tracing::debug!(%client, "cliente no permitido");
+                sh.security.record(SecurityEvent { event: "client_denied", srcip: Some(client), ..Default::default() });
                 sh.detector.observe(client, Some(403), None);
                 return empty_response(StatusCode::FORBIDDEN).into();
             }
@@ -339,6 +348,7 @@ impl HttpHandler for CacheHandler {
                 sh.client_stats.record_rate_limited(client);
                 sh.detector.observe(client, Some(429), None);
                 tracing::debug!(%client, "límite de peticiones superado");
+                sh.security.record(SecurityEvent { event: "rate_limited", srcip: Some(client), ..Default::default() });
                 let mut res = empty_response(StatusCode::TOO_MANY_REQUESTS);
                 res.headers_mut().insert(header::RETRY_AFTER, HeaderValue::from_static("60"));
                 return res.into();
@@ -355,6 +365,7 @@ impl HttpHandler for CacheHandler {
             if !sh.destinations.permits(ip) {
                 Stats::inc(&sh.stats.blocked_destinations);
                 tracing::debug!(%ip, "petición a destino interno bloqueada");
+                sh.security.record(SecurityEvent { event: "destination_blocked", srcip: Some(client), dstip: Some(ip), port: req.uri().port_u16(), ..Default::default() });
                 let info = RequestInfo::new(client, started, &req, req.uri().scheme_str(), req.uri().host().unwrap_or_default());
                 info.finish(&sh, Outcome::Blocked, Some(403), None);
                 return empty_response(StatusCode::FORBIDDEN).into();

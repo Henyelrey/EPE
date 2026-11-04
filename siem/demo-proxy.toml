@@ -1,0 +1,28 @@
+# Instancia del proxy solo para la demostración: no toca la caché ni la CA reales.
+listen = "127.0.0.1:3190"
+operator_contact = "demo@example.invalid"
+
+# 127.0.0.48 a 127.0.0.63 hacen de equipos de la red. 127.0.0.66 queda fuera y hace de intruso.
+allowed_clients = ["127.0.0.1/32", "127.0.0.48/28"]
+rate_limit_per_minute = 30
+allowed_connect_ports = [80, 443]
+# Solo el origen de pruebas. Cualquier otra dirección interna queda bloqueada.
+allowed_internal_networks = ["127.0.0.1/32", "::1/128"]
+
+data_dir = "./data"
+ca_cert = "./ca/rayo-ca.crt"
+ca_key = "./ca/rayo-ca.key"
+admin_listen = "127.0.0.1:3191"
+admin_token_file = "./ca/admin.token"
+
+cache_plain_http = true
+intercept_domains = ["localhost"]
+maintenance_interval_secs = 5
+alert_ca_days = 0
+
+detections_enabled = true
+detect_denied_per_minute = 5
+
+security_log_enabled = true
+security_log_dir = "./logs"
+security_log_retention_days = 7

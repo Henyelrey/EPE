@@ -6,6 +6,7 @@
 use crate::clients::ClientStats;
 use crate::config::Config;
 use crate::detect::Detector;
+use crate::security::{SecurityEvent, SecurityLog};
 use crate::stats::Stats;
 use crate::store::{disk_space, now, write_atomic};
 use serde::Serialize;
@@ -139,11 +140,23 @@ fn evaluate(i: &Inputs, t: &Thresholds) -> Vec<Alert> {
 pub struct Monitor {
     alerts: Mutex<Vec<Alert>>,
     ca_not_after: i64,
+    security: Option<Arc<SecurityLog>>,
 }
 
 impl Monitor {
     pub fn new(ca_not_after: i64) -> Self {
-        Self { alerts: Mutex::new(Vec::new()), ca_not_after }
+        Self { alerts: Mutex::new(Vec::new()), ca_not_after, security: None }
+    }
+
+    pub fn with_security_log(mut self, security: Arc<SecurityLog>) -> Self {
+        self.security = Some(security);
+        self
+    }
+
+    fn log_security(&self, event: &'static str, name: &str, detail: Option<&str>) {
+        if let Some(security) = &self.security {
+            security.record(SecurityEvent { event, reason: Some(name), detail, ..Default::default() });
+        }
     }
 
     pub fn ca_not_after(&self) -> i64 {
@@ -172,11 +185,13 @@ impl Monitor {
         for alert in &current {
             if !alerts.iter().any(|a| a.name == alert.name) {
                 tracing::warn!(alerta = alert.name, "{}", alert.message);
+                self.log_security("alert_raised", alert.name, Some(&alert.message));
             }
         }
         for old in alerts.iter() {
             if !current.iter().any(|a| a.name == old.name) {
                 tracing::info!(alerta = old.name, "alerta resuelta");
+                self.log_security("alert_resolved", old.name, None);
             }
         }
         *alerts = current;

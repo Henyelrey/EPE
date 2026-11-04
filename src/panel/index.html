@@ -8,8 +8,18 @@
 <script src="/panel.js" defer></script>
 </head>
 <body>
+<div class="shell">
+<aside id="sidebar" class="sidebar" hidden>
+  <p class="brand">rayo-cache</p>
+  <nav aria-label="Secciones del panel">
+    <a class="nav-link" href="#resumen" data-view="resumen">Resumen <span id="alert-badge" class="badge" hidden></span></a>
+    <a class="nav-link" href="#registro" data-view="registro">Registro en vivo</a>
+  </nav>
+  <p class="service"><span id="service-dot" class="dot"></span><span id="service-text"></span></p>
+</aside>
+<div class="content">
 <header class="top">
-  <h1>rayo-cache</h1>
+  <h1 id="page-title">Panel de rayo-cache</h1>
   <p id="freshness" class="muted" aria-live="polite"></p>
   <button id="logout" type="button" class="ghost" hidden>Salir</button>
 </header>
@@ -98,6 +108,47 @@
     </div>
   </section>
 </main>
+
+<main id="log-view" hidden>
+  <section class="card">
+    <h2>Tráfico de los últimos 5 minutos</h2>
+    <ul id="traffic-legend" class="legend"></ul>
+    <p id="traffic-empty" class="muted">Reuniendo datos. La primera muestra tarda unos segundos.</p>
+    <div id="traffic-chart" class="chart" role="img"></div>
+    <p class="muted note">No incluye las conexiones sin descifrar: el proxy no conoce su tamaño.</p>
+  </section>
+
+  <section class="card">
+    <h2>Últimas peticiones</h2>
+    <p id="live-off" class="muted" hidden>Desactivado. Se activa con <code>live_log_enabled = true</code>, y el aviso a los usuarios lo indicará.</p>
+    <div id="live-controls" class="log-controls" hidden>
+      <label>Resultado<select id="live-result"></select></label>
+      <label>Registros
+        <select id="live-limit">
+          <option>20</option>
+          <option selected>50</option>
+          <option>100</option>
+          <option>200</option>
+          <option>500</option>
+          <option>1000</option>
+        </select>
+      </label>
+      <label class="grow">Filtro<input id="live-filter" type="search" autocomplete="off" spellcheck="false" placeholder="Dominio, objeto o cliente"></label>
+      <button id="live-pause" type="button" class="ghost" aria-pressed="false">Pausar</button>
+    </div>
+    <p id="live-empty" class="muted" hidden></p>
+    <div id="live-wrap" class="table-scroll" tabindex="0" role="region" aria-label="Últimas peticiones" hidden>
+      <table>
+        <thead><tr><th scope="col">Fecha y hora</th><th scope="col" id="live-client-head">Cliente</th><th scope="col">Resultado</th><th scope="col">Dominio</th><th scope="col">Objeto</th><th scope="col" class="num">Tamaño</th><th scope="col" class="num">Tiempo</th></tr></thead>
+        <tbody id="live-table"></tbody>
+      </table>
+    </div>
+    <p id="live-count" class="muted note" aria-live="polite" hidden></p>
+    <p id="live-note" class="muted note" hidden>Solo está en memoria y se olvida tras un día o al reiniciar. Nunca incluye parámetros de la dirección, y la ruta solo aparece en contenido servido desde una copia o guardado.</p>
+  </section>
+</main>
+</div>
+</div>
 <div id="tooltip" class="tooltip" role="tooltip" hidden></div>
 </body>
 </html>

@@ -1,4 +1,4 @@
-//! Puerto de administración, separado del proxy: panel, métricas y detalle por cliente.
+//! Puerto de administración, separado del proxy: panel, métricas, detalle por cliente y registro en vivo.
 //!
 //! No es un host virtual como rayo.stats porque cualquier página abierta en un navegador que use el
 //! proxy puede enviarle peticiones a un host virtual. Aquí todo dato exige un token que una página
@@ -7,7 +7,9 @@
 use crate::clients::ClientStats;
 use crate::config::Config;
 use crate::detect::Detector;
+use crate::live::{LiveLog, Traffic, MAX_ENTRIES};
 use crate::monitor::Monitor;
+use crate::security::{SecurityEvent, SecurityLog};
 use crate::secure::{random_bytes, write_private};
 use crate::stats::Stats;
 use anyhow::{bail, Context};
@@ -17,7 +19,7 @@ use hyper::body::Incoming;
 use hyper::header::{self, HeaderValue};
 use hyper::{Method, Request, Response, StatusCode};
 use hyper_util::rt::{TokioIo, TokioTimer};
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
@@ -37,6 +39,9 @@ struct AdminState {
     monitor: Arc<Monitor>,
     clients: Arc<ClientStats>,
     detector: Arc<Detector>,
+    live: Arc<LiveLog>,
+    traffic: Arc<Traffic>,
+    security: Arc<SecurityLog>,
 }
 
 /// Lee el token o, si no existe, crea uno. Su valor nunca se escribe en el registro.
@@ -102,7 +107,7 @@ fn summary(state: &AdminState) -> serde_json::Value {
     value
 }
 
-fn route(method: &Method, path: &str, authorization: Option<&HeaderValue>, state: &AdminState) -> Response<Full<Bytes>> {
+fn route(client: IpAddr, method: &Method, path: &str, authorization: Option<&HeaderValue>, state: &AdminState) -> Response<Full<Bytes>> {
     if method != Method::GET {
         return plain(StatusCode::METHOD_NOT_ALLOWED, "solo GET\n");
     }
@@ -111,10 +116,12 @@ fn route(method: &Method, path: &str, authorization: Option<&HeaderValue>, state
         "/" => return panel_page(),
         "/panel.css" => return respond(StatusCode::OK, "text/css; charset=utf-8", PANEL_CSS),
         "/panel.js" => return respond(StatusCode::OK, "text/javascript; charset=utf-8", PANEL_JS),
-        "/metrics" | "/api/summary" | "/api/clients" | "/api/detections" => {}
+        "/metrics" | "/api/summary" | "/api/clients" | "/api/detections" | "/api/live" | "/api/traffic" => {}
         _ => return plain(StatusCode::NOT_FOUND, "no existe\n"),
     }
     if !is_authorized(authorization, &state.token) {
+        let reason = if authorization.is_some() { "invalid" } else { "missing" };
+        state.security.record(SecurityEvent { event: "admin_auth_failed", srcip: Some(client), path: Some(path), reason: Some(reason), ..Default::default() });
         let mut res = plain(StatusCode::UNAUTHORIZED, "falta el token\n");
         res.headers_mut().insert(header::WWW_AUTHENTICATE, HeaderValue::from_static("Bearer"));
         return res;
@@ -126,12 +133,33 @@ fn route(method: &Method, path: &str, authorization: Option<&HeaderValue>, state
         }
         "/api/summary" => json(&summary(state)),
         "/api/detections" => json(&serde_json::json!({ "enabled": state.detector.enabled(), "events": state.detector.events() })),
+        "/api/live" => json(&serde_json::json!({
+            "enabled": state.live.enabled(),
+            "client": state.live.mode(),
+            "capacity": MAX_ENTRIES,
+            "entries": state.live.entries(),
+        })),
+        "/api/traffic" => json(&serde_json::json!({
+            "interval_secs": Traffic::INTERVAL_SECS,
+            "capacity": Traffic::CAPACITY,
+            "points": state.traffic.points(),
+        })),
         _ => json(&serde_json::json!({ "enabled": state.clients.enabled(), "clients": state.clients.rows() })),
     }
 }
 
 /// Abre el puerto. Si no se puede, el proxy no arranca: mejor saberlo que quedarse sin métricas.
-pub async fn start(cfg: &Config, stats: Arc<Stats>, monitor: Arc<Monitor>, clients: Arc<ClientStats>, detector: Arc<Detector>) -> anyhow::Result<()> {
+#[allow(clippy::too_many_arguments)]
+pub async fn start(
+    cfg: &Config,
+    stats: Arc<Stats>,
+    monitor: Arc<Monitor>,
+    clients: Arc<ClientStats>,
+    detector: Arc<Detector>,
+    live: Arc<LiveLog>,
+    traffic: Arc<Traffic>,
+    security: Arc<SecurityLog>,
+) -> anyhow::Result<()> {
     let listen = cfg.admin_listen.trim();
     if listen.is_empty() {
         return Ok(());
@@ -144,16 +172,16 @@ pub async fn start(cfg: &Config, stats: Arc<Stats>, monitor: Arc<Monitor>, clien
     }
     tracing::info!("panel en http://{addr}/ y métricas en /metrics (token en {})", cfg.admin_token_file.display());
 
-    let state = Arc::new(AdminState { token, stats, monitor, clients, detector });
+    let state = Arc::new(AdminState { token, stats, monitor, clients, detector, live, traffic, security });
     tokio::spawn(async move {
         loop {
-            let Ok((stream, _)) = listener.accept().await else {
+            let Ok((stream, peer)) = listener.accept().await else {
                 continue;
             };
             let state = state.clone();
             tokio::spawn(async move {
                 let service = hyper::service::service_fn(move |req: Request<Incoming>| {
-                    let res = route(req.method(), req.uri().path(), req.headers().get(header::AUTHORIZATION), &state);
+                    let res = route(peer.ip(), req.method(), req.uri().path(), req.headers().get(header::AUTHORIZATION), &state);
                     async move { Ok::<_, std::convert::Infallible>(res) }
                 });
                 // El límite evita que una conexión a medias quede ocupando recursos para siempre.
@@ -171,6 +199,8 @@ pub async fn start(cfg: &Config, stats: Arc<Stats>, monitor: Arc<Monitor>, clien
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::access_log::Record;
+    use crate::config::LiveClientMode;
     use crate::detect::Limits;
     use crate::stats::Outcome;
     use http_body_util::BodyExt;
@@ -184,12 +214,15 @@ mod tests {
             monitor: Arc::new(Monitor::new(99)),
             clients: Arc::new(ClientStats::new(true)),
             detector: Arc::new(Detector::new(true, Limits { requests_per_minute: 0, bytes_per_minute: 0, denied_per_minute: 0 }, Arc::new(Stats::default()))),
+            live: Arc::new(LiveLog::new(true, LiveClientMode::Ip)),
+            traffic: Arc::new(Traffic::default()),
+            security: Arc::new(SecurityLog::disabled(Arc::new(Stats::default()))),
         }
     }
 
     fn get(state: &AdminState, method: Method, path: &str, authorization: Option<&str>) -> Response<Full<Bytes>> {
         let value = authorization.map(|a| HeaderValue::from_str(a).unwrap());
-        route(&method, path, value.as_ref(), state)
+        route("127.0.0.1".parse().unwrap(), &method, path, value.as_ref(), state)
     }
 
     fn status(method: Method, path: &str, authorization: Option<&str>) -> StatusCode {
@@ -203,7 +236,7 @@ mod tests {
     #[test]
     fn todos_los_datos_exigen_el_token() {
         let good = format!("Bearer {TOKEN}");
-        for path in ["/metrics", "/api/summary", "/api/clients", "/api/detections"] {
+        for path in ["/metrics", "/api/summary", "/api/clients", "/api/detections", "/api/live", "/api/traffic"] {
             assert_eq!(status(Method::GET, path, Some(&good)), StatusCode::OK, "{path}");
             assert_eq!(status(Method::GET, path, None), StatusCode::UNAUTHORIZED, "{path}");
             assert_eq!(status(Method::GET, path, Some("Bearer incorrecto")), StatusCode::UNAUTHORIZED, "{path}");
@@ -273,6 +306,34 @@ mod tests {
         assert_eq!(value["enabled"], true);
         assert_eq!(value["events"][0]["ip"], "10.9.8.7");
         assert_eq!(value["events"][0]["kind"], "rare_port");
+    }
+
+    #[tokio::test]
+    async fn los_dominios_del_registro_solo_salen_en_su_ruta() {
+        let state = state();
+        state.live.record(&Record {
+            client: "10.9.8.7".parse().unwrap(),
+            method: "GET",
+            scheme: Some("https"),
+            host: "cdn.example.com",
+            port: None,
+            path: Some("/a.js"),
+            outcome: Outcome::Hit,
+            status: Some(200),
+            bytes: Some(1),
+            elapsed: Duration::ZERO,
+        });
+        let auth = format!("Bearer {TOKEN}");
+        for path in ["/api/summary", "/api/clients", "/api/detections", "/api/traffic", "/metrics"] {
+            let text = body(get(&state, Method::GET, path, Some(&auth))).await;
+            assert!(!text.contains("cdn.example.com"), "{path}");
+        }
+        let text = body(get(&state, Method::GET, "/api/live", Some(&auth))).await;
+        let value: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(value["enabled"], true);
+        assert_eq!(value["client"], "ip");
+        assert_eq!(value["entries"][0]["host"], "cdn.example.com");
+        assert_eq!(value["entries"][0]["client"], "10.9.8.7");
     }
 
     #[test]

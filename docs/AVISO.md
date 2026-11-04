@@ -53,13 +53,15 @@ Los sitios `http://` no usan cifrado, así que el proxy los ve siempre, tengas o
 | Tu IP, para aplicar el límite de peticiones | Sí | Solo en memoria, durante el minuto en curso |
 | [Borra esta fila si no activas los totales por dispositivo] Tu IP junto a cuántas peticiones y bytes usaste y cuándo fue la última vez, pero no qué sitios | Sí | Solo en memoria: se olvida tras un día sin actividad o al reiniciar el proxy |
 | [Borra esta fila si desactivas las detecciones] Aviso de actividad inusual: tu IP, el tipo de aviso, cuántas veces ocurrió, cuándo y, si aplica, el puerto, pero no qué sitios | Sí | Solo en memoria: se olvida tras un día o al reiniciar el proxy |
+| [Borra esta fila si no activas el registro en vivo] Registro en vivo en el panel: fecha y hora, método, dominio, resultado, tamaño y duración de las últimas 1000 peticiones y conexiones cifradas | [Usa una: "Con tu IP", "Con un identificador que cambia cada día, calculado a partir de tu IP" o "No"] | Solo en memoria: se olvida tras un día o al reiniciar el proxy |
+| [Borra esta fila si no activas el registro de seguridad] Eventos anómalos: fecha y hora, tipo de evento y, si aplica, el destino bloqueado, sin tu navegación normal. Los recibe el sistema de monitoreo de seguridad [indica cuál y quién lo revisa] | Sí, con tu IP | [días configurados] días en el proxy; [indica cuánto se conserva en el sistema de monitoreo] |
 | [Borra esta fila si no activas el registro de acceso] Registro de acceso: fecha y hora, método, dominio, resultado, tamaño y duración de cada petición y conexión cifrada | [Usa una: "Con un identificador que cambia cada día, calculado a partir de tu IP" o "No"] | [días configurados] días |
 
-**Nunca se guardan** cookies, credenciales, formularios enviados ni respuestas a peticiones que lleven cookies o credenciales. El registro de acceso tampoco incluye los parámetros de la dirección, y solo anota la ruta del contenido servido desde una copia o guardado.
+**Nunca se guardan** cookies, credenciales, formularios enviados ni respuestas a peticiones que lleven cookies o credenciales. El registro de acceso y el registro en vivo tampoco incluyen los parámetros de la dirección, y solo anotan la ruta del contenido servido desde una copia o guardado.
 
 [Borra este párrafo si el registro de acceso no usa identificador] El identificador del registro de acceso no contiene tu IP, pero durante un día permite ver qué dominios visitó un mismo dispositivo. En una red pequeña podría deducirse de quién es.
 
-Si el responsable activa el registro detallado, el registro del proxy puede incluir además la IP de los dispositivos y los dominios a los que se conectan. La página del aviso muestra si el registro detallado, el registro de acceso, los totales por dispositivo y las detecciones están activos.
+Si el responsable activa el registro detallado, el registro del proxy puede incluir además la IP de los dispositivos y los dominios a los que se conectan. La página del aviso muestra si el registro detallado, el registro de acceso, el registro en vivo, el registro de seguridad, los totales por dispositivo y las detecciones están activos.
 
 **Quién puede ver estos datos:** [personas o cargos]. Técnicamente, quien administra el equipo puede acceder a todos ellos.
 

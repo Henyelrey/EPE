@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Prueba de punta a punta: origen de laboratorio (HTTP :8080 / HTTPS :8443) + varios proxies en :3129-3137, :3139 y :3146-3153.
+# Prueba de punta a punta: origen de laboratorio (HTTP :8080 / HTTPS :8443) + varios proxies en :3129-3137, :3139 y :3146-3162.
 # Requiere: openssl, python3 y curl. No hace falta tocar el archivo hosts: usa localhost (se intercepta)
 # y 127.0.0.1 (no se intercepta). Sale con código 1 si alguna verificación falla.
 #
@@ -24,7 +24,7 @@ openssl x509 -req -in origin.csr -CA origin-ca.pem -CAkey origin-ca.key -CAcreat
 
 # Escribe config.<nombre>.toml. Se puede ajustar con LISTEN, CLIENTS, RATE, INTERNAL, BUDGET, DOMAINS, CONTACT,
 # ADMIN, ADMIN_TOKEN, LOG_ENABLED, LOG_DAYS, LOG_IP, MAX_DISK, ALERT_DISK_FREE, ALERT_CA_DAYS, CLIENT_STATS, PORTS,
-# DETECT, DETECT_REQUESTS, DETECT_BYTES y DETECT_DENIED.
+# DETECT, DETECT_REQUESTS, DETECT_BYTES, DETECT_DENIED, LIVE, LIVE_CLIENT y SECURITY.
 write_config() {
   local listen="${LISTEN:-127.0.0.1:$2}" clients="${CLIENTS:-[\"127.0.0.1/32\", \"::1/128\"]}"
   local internal="${INTERNAL:-[\"127.0.0.0/8\", \"::1/128\"]}" domains="${DOMAINS:-[\"localhost\"]}"
@@ -58,10 +58,14 @@ maintenance_interval_secs = 1
 alert_disk_free_percent = ${ALERT_DISK_FREE:-0}
 alert_ca_days = ${ALERT_CA_DAYS:-30}
 client_stats_enabled = ${CLIENT_STATS:-false}
+live_log_enabled = ${LIVE:-false}
+live_log_client = "${LIVE_CLIENT:-pseudonym}"
 detections_enabled = ${DETECT:-true}
 detect_requests_per_minute = ${DETECT_REQUESTS:-3000}
 detect_bytes_per_minute = ${DETECT_BYTES:-1073741824}
 detect_denied_per_minute = ${DETECT_DENIED:-100}
+security_log_enabled = ${SECURITY:-false}
+security_log_dir = "./logs-$1"
 access_log_enabled = ${LOG_ENABLED:-false}
 access_log_dir = "./logs-$1"
 access_log_retention_days = ${LOG_DAYS:-7}
@@ -106,6 +110,12 @@ ADMIN=127.0.0.1:3149 ALERT_CA_DAYS=5000 ALERT_DISK_FREE=100 CLIENT_STATS=true st
 ADMIN=127.0.0.1:3151 LOG_ENABLED=true DETECT_REQUESTS=20 DETECT_BYTES=200000 DETECT_DENIED=5 start_proxy watcher 3150
 WATCHER_PID=${PIDS[-1]}
 ADMIN=127.0.0.1:3153 DETECT=false PORTS='[]' start_proxy unwatched 3152
+ADMIN=127.0.0.1:3155 LIVE=true LIVE_CLIENT=ip start_proxy liveip 3154
+LIVE_PID=${PIDS[-1]}
+ADMIN=127.0.0.1:3157 LIVE=true start_proxy livehidden 3156
+ADMIN=127.0.0.1:3159 SECURITY=true ALERT_CA_DAYS=5000 DETECT_DENIED=3 start_proxy secured 3158
+SECURITY=true CLIENTS='["192.0.2.0/24"]' start_proxy secdenied 3160
+SECURITY=true RATE=2 start_proxy secrate 3161
 
 FAILS=0
 expect() { # descripción, esperado, obtenido
@@ -644,6 +654,107 @@ expect "ni cuentan"                          "0" "$(mismatches)"
 page=$(body http://rayo.aviso/)
 expect "y el aviso lo dice"                  "si" "$(has "$page" 'Detección de actividad inusual: desactivada')"
 expect "igual que los puertos abiertos"      "si" "$(has "$page" 'a cualquier puerto público')"
+
+section "27. Registro en vivo y gráfica"
+live() { api $ADMIN_URL/api/live; }
+curl -s --noproxy "*" -o panel.html $ADMIN_URL/
+expect "el panel ofrece la vista"            "1" "$(grep -c 'href="#registro"' panel.html)"
+rm -f panel.html
+expect "el registro exige el token"          "401" "$(admin_status $ADMIN_URL/api/live)"
+expect "y la gráfica también"                "401" "$(admin_status $ADMIN_URL/api/traffic)"
+px http://localhost:8080/copia.js >/dev/null
+expect "apagado no guarda nada"              "False []" "$(live | field 'str(v["enabled"]) + " " + str(v["entries"])')"
+expect "y el aviso lo dice"                  "si" "$(has "$(body http://rayo.aviso/)" 'Registro en vivo: desactivado')"
+PX=http://127.0.0.1:3154
+ADMIN_URL=http://127.0.0.1:3155
+expect "una petición nueva se descarga"      "200 MISS" "$(px "$L/static.js?secreto=abc123")"
+expect "y otra sale de la copia"             "200 HIT" "$(px "$L/static.js?secreto=abc123")"
+expect "lo último aparece primero"           "hit" "$(live | field 'v["entries"][0]["result"]')"
+expect "con el dominio"                      "localhost" "$(live | field 'v["entries"][0]["host"]')"
+expect "la ruta del contenido público"       "/static.js" "$(live | field 'v["entries"][0]["path"]')"
+expect "y el tamaño"                         "si" "$(over "$(live | field 'v["entries"][0]["bytes"]')" 0)"
+expect "con esta opción, la IP"              "127.0.0.1" "$(live | field 'v["entries"][0]["client"]')"
+expect "nunca los parámetros"                "no no" "$(has "$(live)" 'secreto') $(has "$(live)" 'abc123')"
+px "http://localhost:8080/no-existe" >/dev/null
+sleep 0.3
+expect "sin ruta si no es contenido público" "no" "$(has "$(live)" 'no-existe')"
+curlx --max-time 5 -o /dev/null https://127.0.0.1:8443/static.js
+sleep 0.3
+expect "los túneles también se ven"          "True" "$(live | field 'any(e["result"]=="tunnel" and e["host"]=="127.0.0.1" and e["port"]==8443 for e in v["entries"])')"
+expect "y tienen tamaño desconocido"         "None" "$(live | field '[e["bytes"] for e in v["entries"] if e["result"]=="tunnel"][0]')"
+expect "el resumen no muestra dominios"      "no" "$(has "$(api $ADMIN_URL/api/summary)" 'static.js')"
+page=$(body http://rayo.aviso/)
+expect "el aviso dice que está activo"       "si" "$(has "$page" 'Registro en vivo: activado')"
+expect "y que aparece la IP"                 "si" "$(has "$page" 'junto a tu IP')"
+sleep 7
+px "$L/static.js" >/dev/null
+sleep 4
+traffic=$(api $ADMIN_URL/api/traffic)
+expect "la gráfica toma muestras"            "si" "$(over "$(echo "$traffic" | field 'len(v["points"])')" 1)"
+expect "y mide lo servido desde copia"       "si" "$(over "$(echo "$traffic" | field 'max(p["copy"] for p in v["points"])')" 0)"
+expect "sin datos por persona ni dominios"   "no no" "$(has "$traffic" '127.0.0.1') $(has "$traffic" 'localhost')"
+sleep 1.5
+expect "en disco no queda el registro"       "0" "$(grep -c 'static.js' data-liveip/stats.json)"
+expect "ni crea un log"                      "no" "$(if [ -e logs-liveip ]; then echo si; else echo no; fi)"
+kill "$LIVE_PID"
+sleep 1
+launch_proxy liveip 3154
+expect "al reiniciar se olvida"              "[]" "$(live | field 'v["entries"]')"
+PX=http://127.0.0.1:3156
+ADMIN_URL=http://127.0.0.1:3157
+px "$L/static.js" >/dev/null
+sleep 0.3
+expect "por defecto no muestra la IP"        "no" "$(has "$(live)" '127.0.0.1')"
+expect "sino un identificador"               "16" "$(live | field 'len(v["entries"][0]["client"])')"
+expect "y el aviso lo explica"               "si" "$(has "$(body http://rayo.aviso/)" 'Tu IP no aparece')"
+
+section "28. Log de seguridad"
+sec_count() { sleep 0.3; python3 - "$1" "$2" <<'PY'
+import glob, json, sys
+lines = [json.loads(t) for f in glob.glob(f"logs-{sys.argv[1]}/security-*.jsonl") for t in open(f, encoding="utf-8")]
+print(sum(1 for l in lines if eval(sys.argv[2])))
+PY
+}
+sec_text() { cat logs-"$1"/security-*.jsonl; }
+expect "apagado no crea el archivo"          "0" "$(ls logs-livehidden/security-* 2>/dev/null | wc -l | tr -d ' ')"
+expect "y el aviso lo dice"                  "si" "$(has "$(body http://rayo.aviso/)" 'Registro de seguridad: desactivado')"
+PX=http://127.0.0.1:3158
+ADMIN_URL=http://127.0.0.1:3159
+expect "registra el arranque"                "1" "$(sec_count secured 'l["event"]=="startup" and l["app"]=="rayo-cache"')"
+px http://localhost:8080/copia.js >/dev/null
+px http://localhost:8080/copia.js >/dev/null
+expect "la navegación normal no se anota"    "no" "$(has "$(sec_text secured)" 'copia.js')"
+admin_status $ADMIN_URL/api/summary >/dev/null
+expect "un token ausente se anota"           "1" "$(sec_count secured 'l["event"]=="admin_auth_failed" and l["reason"]=="missing" and l["srcip"]=="127.0.0.1" and l["path"]=="/api/summary"')"
+admin_status -H "Authorization: Bearer token-de-prueba-falso" $ADMIN_URL/metrics >/dev/null
+expect "y uno incorrecto también"            "1" "$(sec_count secured 'l["event"]=="admin_auth_failed" and l["reason"]=="invalid"')"
+expect "sin guardar lo que se intentó"       "no" "$(has "$(sec_text secured)" 'token-de-prueba-falso')"
+api $ADMIN_URL/api/summary >/dev/null
+expect "un token correcto no se anota"       "2" "$(sec_count secured 'l["event"]=="admin_auth_failed"')"
+expect "el token real nunca aparece"         "no" "$(has "$(sec_text secured)" "$TOKEN")"
+connect_status https://localhost:25/ >/dev/null
+expect "un puerto bloqueado se anota"        "1" "$(sec_count secured 'l["event"]=="port_blocked" and l["host"]=="localhost" and l["dstport"]==25 and l["srcip"]=="127.0.0.1"')"
+px http://169.254.169.254/latest/meta-data/ >/dev/null
+expect "los metadatos de la nube también"    "1" "$(sec_count secured 'l["event"]=="destination_blocked" and l.get("dstip")=="169.254.169.254"')"
+expect "sin la ruta que se pidió"            "no" "$(has "$(sec_text secured)" 'meta-data')"
+connect_status https://10.0.0.1:443/ >/dev/null
+expect "y un túnel a la red interna"         "1" "$(sec_count secured 'l["event"]=="destination_blocked" and l.get("dstip")=="10.0.0.1" and l["dstport"]==443')"
+px -H 'Host: otra.invalid' http://localhost:8080/copia.js >/dev/null
+expect "un nombre que no coincide se anota"  "1" "$(sec_count secured 'l["event"]=="detection" and l["reason"]=="host_mismatch"')"
+expect "sin el nombre declarado"             "no" "$(has "$(sec_text secured)" 'otra.invalid')"
+for n in 1 2 3 4; do px http://localhost:8080/no-existe >/dev/null; done
+expect "muchos rechazos también"             "si" "$(over "$(sec_count secured 'l["event"]=="detection" and l["reason"]=="denied"')" 0)"
+sleep 1.5
+expect "una alerta del panel también"        "1" "$(sec_count secured 'l["event"]=="alert_raised" and l["reason"]=="ca_expiry"')"
+expect "el aviso dice que está activo"       "si" "$(has "$(body http://rayo.aviso/)" 'Registro de seguridad: activado')"
+PX=http://127.0.0.1:3160
+denied_before=$(sec_count secdenied 'l["event"]=="client_denied"')
+expect "un cliente no permitido sigue fuera" "403 -" "$(px http://localhost:8080/copia.js)"
+expect "y se anota"                          "$((denied_before + 1))" "$(sec_count secdenied 'l["event"]=="client_denied" and l["srcip"]=="127.0.0.1"')"
+PX=http://127.0.0.1:3161
+for n in 1 2 3 4 5; do last=$(px http://localhost:8080/copia.js); done
+expect "el límite de peticiones sigue activo" "429 -" "$last"
+expect "y se anota"                          "si" "$(over "$(sec_count secrate 'l["event"]=="rate_limited"')" 0)"
 
 echo
 if [ "$FAILS" -eq 0 ]; then

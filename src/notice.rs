@@ -5,7 +5,8 @@
 //! registro nuevo, hay que actualizar la sección "Qué se guarda" y también docs/AVISO.md.
 
 use crate::ca::CaSummary;
-use crate::config::{ClientIpMode, Config};
+use crate::config::{ClientIpMode, Config, LiveClientMode};
+use crate::live::MAX_ENTRIES;
 
 fn escape(text: &str) -> String {
     text.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('"', "&quot;").replace('\'', "&#39;")
@@ -68,6 +69,30 @@ pub fn render(cfg: &Config, ca: &CaSummary, detailed_logs: bool) -> String {
          quien administra el proxy ve su IP, el tipo de aviso, cuántas veces ocurrió, cuándo y, si aplica, el puerto, pero no qué sitios. Solo está en memoria y se olvida tras un día o al reiniciar el proxy. Los totales por tipo, sin IP, se conservan.</li>"
     } else {
         "<li>Detección de actividad inusual: desactivada. Si se activara, quien administra el proxy podría ver la IP de los dispositivos con actividad inusual, y este aviso lo indicaría.</li>"
+    };
+    let live_log = if cfg.live_log_enabled {
+        let identity = match cfg.live_log_client {
+            LiveClientMode::Ip => "Aparece junto a tu IP, así que permite ver qué dominios pide tu dispositivo.",
+            LiveClientMode::Pseudonym => {
+                "Tu IP no aparece: se muestra un identificador calculado a partir de ella, que cambia cada día. Aun así, permite ver qué dominios pidió un mismo dispositivo, y en una red pequeña podría deducirse de quién es."
+            }
+            LiveClientMode::None => "No se muestra nada que distinga a tu dispositivo de los demás.",
+        };
+        format!(
+            "<li><strong>Registro en vivo: activado.</strong> Quien administra el proxy puede ver en su panel las últimas {MAX_ENTRIES} peticiones y conexiones cifradas de todos los dispositivos: fecha y hora, método, dominio, resultado, tamaño y duración. \
+             La ruta solo aparece en contenido servido desde una copia o guardado. Nunca incluye parámetros de la dirección, cookies, credenciales ni contenido. {identity} Solo está en memoria y se olvida tras un día o al reiniciar el proxy.</li>"
+        )
+    } else {
+        "<li>Registro en vivo: desactivado. Si se activara, quien administra el proxy podría ver en su panel los dominios que piden los dispositivos, y este aviso lo indicaría.</li>".to_owned()
+    };
+    let security_log = if cfg.security_log_enabled {
+        format!(
+            "<li><strong>Registro de seguridad: activado.</strong> Se guarda con tu IP cuando ocurre algo anómalo: un acceso rechazado, un destino o puerto bloqueado, un límite superado o un token incorrecto en el panel de administración. \
+             Incluye la fecha y hora, el tipo de evento y, si aplica, el destino bloqueado. No incluye tu navegación normal, parámetros de la dirección, cookies, credenciales ni contenido. Lo recibe el sistema de monitoreo de seguridad de quien administra el proxy. El proxy lo borra a los {} días, pero ese sistema puede conservar su propia copia durante más tiempo.</li>",
+            cfg.security_log_retention_days
+        )
+    } else {
+        "<li>Registro de seguridad: desactivado. Si se activara, se guardaría tu IP junto a los eventos anómalos, y este aviso lo indicaría.</li>".to_owned()
     };
     let retention = if cfg.max_disk_bytes > 0 {
         "Cuando el disco llega al límite configurado, se borran las usadas hace más tiempo. Si no se llega, pueden permanecer hasta que quien administra el proxy las elimine."
@@ -141,6 +166,8 @@ footer {{ margin-top: 3rem; color: var(--muted); font-size: .875rem; }}
 {access_log}
 {client_stats}
 {detections}
+{live_log}
+{security_log}
 <li><strong>Contadores:</strong> totales generales, tiempos de respuesta y uso de disco, sin datos por persona. Se conservan al reiniciar el proxy.</li>
 </ul>
 <p>{detailed}</p>
@@ -247,6 +274,33 @@ mod tests {
         let page = render(&open, &ca(None), false);
         assert!(page.contains("Detección de actividad inusual: desactivada"));
         assert!(page.contains("a cualquier puerto público"));
+    }
+
+    #[test]
+    fn indica_el_registro_en_vivo_y_como_aparece_el_cliente() {
+        let page = render(&cfg(), &ca(None), false);
+        assert!(page.contains("Registro en vivo: desactivado"));
+
+        let live = Config { live_log_enabled: true, ..cfg() };
+        let page = render(&live, &ca(None), false);
+        assert!(page.contains("Registro en vivo: activado"));
+        assert!(page.contains("Tu IP no aparece"));
+        assert!(page.contains("últimas 1000 peticiones"));
+
+        let with_ip = Config { live_log_client: LiveClientMode::Ip, ..live.clone() };
+        assert!(render(&with_ip, &ca(None), false).contains("junto a tu IP"));
+        let anonymous = Config { live_log_client: LiveClientMode::None, ..live };
+        assert!(render(&anonymous, &ca(None), false).contains("No se muestra nada que distinga"));
+    }
+
+    #[test]
+    fn indica_el_registro_de_seguridad() {
+        assert!(render(&cfg(), &ca(None), false).contains("Registro de seguridad: desactivado"));
+        let secured = Config { security_log_enabled: true, security_log_retention_days: 9, ..cfg() };
+        let page = render(&secured, &ca(None), false);
+        assert!(page.contains("Registro de seguridad: activado"));
+        assert!(page.contains("a los 9 días"));
+        assert!(page.contains("No incluye tu navegación normal"));
     }
 
     #[test]

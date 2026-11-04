@@ -21,7 +21,7 @@ use std::time::Duration;
 use tokio::io::{AsyncWriteExt, BufWriter};
 use tokio::sync::mpsc;
 
-const SECS_PER_DAY: u64 = 86_400;
+pub const SECS_PER_DAY: u64 = 86_400;
 const QUEUE_LINES: usize = 10_000;
 /// Las rutas absurdamente largas se recortan: no aportan nada y permitirían llenar el disco más rápido.
 const MAX_FIELD_CHARS: usize = 512;
@@ -41,29 +41,29 @@ fn civil_date(days: u64) -> (u64, u64, u64) {
     (year, month, day)
 }
 
-fn date_string(days: u64) -> String {
+pub fn date_string(days: u64) -> String {
     let (y, m, d) = civil_date(days);
     format!("{y:04}-{m:02}-{d:02}")
 }
 
-fn timestamp(secs: u64) -> String {
+pub fn timestamp(secs: u64) -> String {
     let rest = secs % SECS_PER_DAY;
     format!("{}T{:02}:{:02}:{:02}Z", date_string(secs / SECS_PER_DAY), rest / 3600, rest % 3600 / 60, rest % 60)
 }
 
-fn file_name(days: u64) -> String {
-    format!("access-{}.jsonl", date_string(days))
+fn file_name(prefix: &str, days: u64) -> String {
+    format!("{prefix}-{}.jsonl", date_string(days))
 }
 
 /// Archivos de esta carpeta cuya fecha ya venció. Solo considera nombres con el formato exacto del
 /// log: cualquier otro archivo que haya en la carpeta nunca se toca.
-fn expired_files<'a>(names: impl Iterator<Item = &'a str>, today: u64, retention_days: u64) -> Vec<&'a str> {
-    let oldest_kept = file_name(today.saturating_sub(retention_days.saturating_sub(1)));
-    names.filter(|name| is_log_name(name) && *name < oldest_kept.as_str()).collect()
+fn expired_files<'a>(names: impl Iterator<Item = &'a str>, prefix: &str, today: u64, retention_days: u64) -> Vec<&'a str> {
+    let oldest_kept = file_name(prefix, today.saturating_sub(retention_days.saturating_sub(1)));
+    names.filter(|name| is_log_name(prefix, name) && *name < oldest_kept.as_str()).collect()
 }
 
-fn is_log_name(name: &str) -> bool {
-    let Some(date) = name.strip_prefix("access-").and_then(|n| n.strip_suffix(".jsonl")) else {
+fn is_log_name(prefix: &str, name: &str) -> bool {
+    let Some(date) = name.strip_prefix(prefix).and_then(|n| n.strip_prefix('-')).and_then(|n| n.strip_suffix(".jsonl")) else {
         return false;
     };
     date.len() == 10
@@ -74,16 +74,16 @@ fn is_log_name(name: &str) -> bool {
 }
 
 /// Seudónimos por IP, con una clave distinta cada día que nunca se escribe en disco.
-struct Pseudonyms {
+pub struct Pseudonyms {
     key: Mutex<(u64, [u8; 32])>,
 }
 
 impl Pseudonyms {
-    fn new() -> Self {
+    pub fn new() -> Self {
         Self { key: Mutex::new((0, [0; 32])) }
     }
 
-    fn pseudonym(&self, ip: IpAddr, day: u64) -> String {
+    pub fn pseudonym(&self, ip: IpAddr, day: u64) -> String {
         let key = {
             let mut current = self.key.lock().expect("la clave de seudónimos no se envenena");
             if current.0 != day {
@@ -129,7 +129,7 @@ struct Line<'a> {
     ms: u64,
 }
 
-fn clip(text: &str) -> &str {
+pub fn clip(text: &str) -> &str {
     match text.char_indices().nth(MAX_FIELD_CHARS) {
         Some((end, _)) => &text[..end],
         None => text,
@@ -152,10 +152,7 @@ impl AccessLog {
         if cfg.access_log_retention_days == 0 {
             bail!("access_log_retention_days debe ser al menos 1");
         }
-        std::fs::create_dir_all(&cfg.access_log_dir)
-            .with_context(|| format!("creando {}", cfg.access_log_dir.display()))?;
-        let (tx, rx) = mpsc::channel(QUEUE_LINES);
-        tokio::spawn(write_loop(rx, cfg.access_log_dir.clone(), cfg.access_log_retention_days, stats.clone()));
+        let tx = start_writer(&cfg.access_log_dir, "access", cfg.access_log_retention_days, stats.clone())?;
         let pseudonyms = match cfg.access_log_client_ip {
             ClientIpMode::Pseudonym => Some(Pseudonyms::new()),
             ClientIpMode::None => None,
@@ -191,18 +188,26 @@ impl AccessLog {
     }
 }
 
-async fn write_loop(mut rx: mpsc::Receiver<String>, dir: PathBuf, retention_days: u64, stats: Arc<Stats>) {
+/// Prepara la carpeta y lanza la tarea que escribe un archivo `<prefijo>-<fecha>.jsonl` por día.
+pub fn start_writer(dir: &Path, prefix: &'static str, retention_days: u64, stats: Arc<Stats>) -> anyhow::Result<mpsc::Sender<String>> {
+    std::fs::create_dir_all(dir).with_context(|| format!("creando {}", dir.display()))?;
+    let (tx, rx) = mpsc::channel(QUEUE_LINES);
+    tokio::spawn(write_loop(rx, dir.to_owned(), prefix, retention_days, stats));
+    Ok(tx)
+}
+
+async fn write_loop(mut rx: mpsc::Receiver<String>, dir: PathBuf, prefix: &'static str, retention_days: u64, stats: Arc<Stats>) {
     let mut current: Option<(u64, BufWriter<tokio::fs::File>)> = None;
     // El primer tick es inmediato, y sigue purgando aunque no haya tráfico: la retención es una promesa.
     let mut purge = tokio::time::interval(PURGE_EVERY);
     loop {
         tokio::select! {
-            _ = purge.tick() => purge_expired(&dir, retention_days).await,
+            _ = purge.tick() => purge_expired(&dir, prefix, retention_days).await,
             line = rx.recv() => {
                 let Some(line) = line else { break };
-                write_line(&mut current, &dir, &line, &stats).await;
+                write_line(&mut current, &dir, prefix, &line, &stats).await;
                 while let Ok(line) = rx.try_recv() {
-                    write_line(&mut current, &dir, &line, &stats).await;
+                    write_line(&mut current, &dir, prefix, &line, &stats).await;
                 }
                 if let Some((_, file)) = &mut current {
                     if let Err(e) = file.flush().await {
@@ -215,13 +220,13 @@ async fn write_loop(mut rx: mpsc::Receiver<String>, dir: PathBuf, retention_days
     }
 }
 
-async fn write_line(current: &mut Option<(u64, BufWriter<tokio::fs::File>)>, dir: &Path, line: &str, stats: &Stats) {
+async fn write_line(current: &mut Option<(u64, BufWriter<tokio::fs::File>)>, dir: &Path, prefix: &str, line: &str, stats: &Stats) {
     let today = now() / SECS_PER_DAY;
     if current.as_ref().is_none_or(|(day, _)| *day != today) {
         if let Some((_, mut old)) = current.take() {
             let _ = old.flush().await;
         }
-        match open_for_day(dir, today).await {
+        match open_for_day(dir, prefix, today).await {
             Ok(file) => *current = Some((today, BufWriter::new(file))),
             Err(e) => {
                 Stats::inc(&stats.access_log_errors);
@@ -238,8 +243,8 @@ async fn write_line(current: &mut Option<(u64, BufWriter<tokio::fs::File>)>, dir
     }
 }
 
-async fn open_for_day(dir: &Path, day: u64) -> anyhow::Result<tokio::fs::File> {
-    let path = dir.join(file_name(day));
+async fn open_for_day(dir: &Path, prefix: &str, day: u64) -> anyhow::Result<tokio::fs::File> {
+    let path = dir.join(file_name(prefix, day));
     let file = tokio::fs::OpenOptions::new().create(true).append(true).open(&path).await?;
     // Se protege antes de escribir la primera línea.
     let to_protect = path.clone();
@@ -247,7 +252,7 @@ async fn open_for_day(dir: &Path, day: u64) -> anyhow::Result<tokio::fs::File> {
     Ok(file)
 }
 
-async fn purge_expired(dir: &Path, retention_days: u64) {
+async fn purge_expired(dir: &Path, prefix: &str, retention_days: u64) {
     let Ok(mut entries) = tokio::fs::read_dir(dir).await else {
         return;
     };
@@ -257,7 +262,7 @@ async fn purge_expired(dir: &Path, retention_days: u64) {
             names.push(name);
         }
     }
-    for name in expired_files(names.iter().map(String::as_str), now() / SECS_PER_DAY, retention_days) {
+    for name in expired_files(names.iter().map(String::as_str), prefix, now() / SECS_PER_DAY, retention_days) {
         if let Err(e) = tokio::fs::remove_file(dir.join(name)).await {
             tracing::warn!(error = %e, "no se pudo borrar el log vencido {name}");
         }
@@ -316,10 +321,11 @@ mod tests {
             "notas.txt",
         ];
         assert_eq!(
-            expired_files(names.iter().copied(), today, 7),
+            expired_files(names.iter().copied(), "access", today, 7),
             ["access-2026-10-27.jsonl", "access-2020-01-01.jsonl"]
         );
-        assert!(expired_files(names.iter().copied(), today, 1).contains(&"access-2026-10-28.jsonl"));
+        assert!(expired_files(["security-2020-01-01.jsonl"].into_iter(), "access", today, 1).is_empty(), "cada log borra solo lo suyo");
+        assert!(expired_files(names.iter().copied(), "access", today, 1).contains(&"access-2026-10-28.jsonl"));
     }
 
     #[test]
@@ -350,7 +356,7 @@ mod tests {
         log.record(request(Outcome::Hit));
         log.record(request(Outcome::Bypass));
 
-        let path = dir.join(file_name(now() / SECS_PER_DAY));
+        let path = dir.join(file_name("access", now() / SECS_PER_DAY));
         let mut text = String::new();
         for _ in 0..100 {
             text = std::fs::read_to_string(&path).unwrap_or_default();

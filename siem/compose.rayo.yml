@@ -1,0 +1,23 @@
+# Se aplica encima del docker-compose.yml oficial de Wazuh. Las rutas son relativas a ese archivo.
+#
+# Solo el panel queda publicado, y solo para este PC: Wazuh viene con contraseñas por defecto.
+# Tampoco arranca solo con Windows: consume varios GB de memoria.
+services:
+  wazuh.manager:
+    restart: "no"
+    ports: !reset []
+    volumes:
+      - ../../demo/ossec.conf:/wazuh-config-mount/etc/ossec.conf:ro
+      - ../../wazuh/local_rules.xml:/wazuh-config-mount/etc/rules/local_rules.xml:ro
+      # Solo la instancia de demostración. En producción, Wazuh lee con un agente instalado en la
+      # máquina del proxy: la clave de la CA real no debe montarse en otro servicio.
+      - ../../demo:/var/rayo:ro
+
+  wazuh.indexer:
+    restart: "no"
+    ports: !reset []
+
+  wazuh.dashboard:
+    restart: "no"
+    ports: !override
+      - "127.0.0.1:5601:5601"

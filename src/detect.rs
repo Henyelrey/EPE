@@ -10,6 +10,7 @@
 //! - Hudsucker no expone los bytes de un túnel, y tampoco lee el SNI si el dominio no se intercepta.
 
 use crate::monitor::format_bytes;
+use crate::security::{SecurityEvent, SecurityLog};
 use crate::stats::Stats;
 use crate::store::now;
 use serde::Serialize;
@@ -102,11 +103,31 @@ pub struct Detector {
     limits: Limits,
     stats: Arc<Stats>,
     state: Mutex<State>,
+    security: Option<Arc<SecurityLog>>,
 }
 
 impl Detector {
     pub fn new(enabled: bool, limits: Limits, stats: Arc<Stats>) -> Self {
-        Self { enabled, limits, stats, state: Mutex::new(State::default()) }
+        Self { enabled, limits, stats, state: Mutex::new(State::default()), security: None }
+    }
+
+    /// Copia al log de seguridad los avisos que no se registran ya en otro sitio.
+    pub fn with_security_log(mut self, security: Arc<SecurityLog>) -> Self {
+        self.security = Some(security);
+        self
+    }
+
+    fn log_security(&self, kind: Kind, ip: IpAddr, detail: &str) {
+        let reason = match kind {
+            Kind::Volume => "volume",
+            Kind::Denied => "denied",
+            Kind::HostMismatch => "host_mismatch",
+            // El rechazo ya deja su evento, con el destino y el puerto.
+            Kind::RarePort => return,
+        };
+        if let Some(security) = &self.security {
+            security.record(SecurityEvent { event: "detection", srcip: Some(ip), reason: Some(reason), detail: Some(detail), ..Default::default() });
+        }
     }
 
     pub fn enabled(&self) -> bool {
@@ -151,6 +172,7 @@ impl Detector {
             found.push((Kind::Denied, format!("Al menos {} respuestas 403 o 404 en un minuto.", limits.denied_per_minute)));
         }
         for (kind, detail) in found {
+            self.log_security(kind, client, &detail);
             state.note(&self.stats, kind, client, detail, at);
         }
     }
@@ -167,6 +189,7 @@ impl Detector {
 
     fn report(&self, client: IpAddr, kind: Kind, detail: String) {
         if self.enabled {
+            self.log_security(kind, client.to_canonical(), &detail);
             let mut state = self.state.lock().expect("las detecciones no se envenenan");
             state.note(&self.stats, kind, client.to_canonical(), detail, now());
         }
