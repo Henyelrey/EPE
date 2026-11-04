@@ -29,15 +29,47 @@ struct Pending {
     stale: Option<Arc<Meta>>,
 }
 
+/// Qué falta por contar de la petición en curso cuando llegue la respuesta o el error del origen.
+#[derive(Clone, Default)]
+enum Exchange {
+    /// Nada: la petición no se contó o ya se contó al recibirla.
+    #[default]
+    Untracked,
+    /// Se reenvía sin tocar la caché.
+    Bypass,
+    /// Puede guardarse o revalidarse según lo que responda el origen.
+    Candidate(Arc<Pending>),
+}
+
 #[derive(Clone)]
 pub struct CacheHandler {
     shared: Arc<Shared>,
-    pending: Option<Arc<Pending>>,
+    exchange: Exchange,
+}
+
+/// Reenvía el cuerpo en streaming contando sus bytes como bypass; conserva tamaño y trailers.
+fn count_bypass(shared: Arc<Shared>, body: Body) -> Body {
+    Body::from(
+        body.map_frame(move |frame| {
+            if let Some(data) = frame.data_ref() {
+                Stats::add(&shared.stats.bytes_bypass, data.len() as u64);
+            }
+            frame
+        })
+        .boxed(),
+    )
+}
+
+fn bad_gateway() -> Response<Body> {
+    Response::builder()
+        .status(StatusCode::BAD_GATEWAY)
+        .body(Body::empty())
+        .expect("respuesta estática válida")
 }
 
 impl CacheHandler {
     pub fn new(shared: Arc<Shared>) -> Self {
-        Self { shared, pending: None }
+        Self { shared, exchange: Exchange::Untracked }
     }
 
     async fn serve_from_cache(&self, meta: &Meta, status: &'static str) -> Option<Response<Body>> {
@@ -71,20 +103,25 @@ impl HttpHandler for CacheHandler {
     async fn should_intercept_connect(&mut self, _ctx: &HttpContext, req: &Request<Body>) -> bool {
         let host = req.uri().host().unwrap_or_default();
         let yes = self.shared.cfg.should_intercept(host);
-        let s = &self.shared.stats;
-        Stats::inc(if yes { &s.tls_intercepted } else { &s.tls_passthrough });
+        if !yes {
+            Stats::inc(&self.shared.stats.tls_passthrough);
+        }
         tracing::debug!(host, intercept = yes, "CONNECT");
         yes
     }
 
     /// Segundo filtro sobre el SNI real del ClientHello: si no está en la lista, pasa cifrado.
+    /// La intercepción se cuenta aquí porque recién en este punto queda decidida.
     async fn should_intercept_tls(&mut self, _ctx: &HttpContext, hello: ClientHello<'_>) -> bool {
-        hello.server_name().map(|sni| self.shared.cfg.should_intercept(sni)).unwrap_or(false)
+        let yes = hello.server_name().map(|sni| self.shared.cfg.should_intercept(sni)).unwrap_or(false);
+        let s = &self.shared.stats;
+        Stats::inc(if yes { &s.tls_intercepted } else { &s.tls_passthrough });
+        yes
     }
 
     async fn handle_request(&mut self, _ctx: &HttpContext, mut req: Request<Body>) -> RequestOrResponse {
         let sh = &self.shared;
-        self.pending = None;
+        self.exchange = Exchange::Untracked;
 
         // Hudsucker también pasa aquí el CONNECT inicial del túnel: no es contenido.
         if req.method() == hudsucker::hyper::Method::CONNECT {
@@ -102,11 +139,16 @@ impl HttpHandler for CacheHandler {
         let scope_ok = match url.scheme.as_str() {
             // HTTPS solo llega aquí si pasó el filtro de intercepción.
             "https" => true,
-            "http" => sh.cfg.cache_plain_http,
+            "http" => sh.cfg.cache_plain_http && !sh.cfg.is_never_intercept(url.hostname()),
             _ => false,
         };
         if !scope_ok || !policy::request_is_cacheable(&req) {
-            Stats::inc(&sh.stats.bypass);
+            if req.headers().contains_key(header::UPGRADE) {
+                // Hudsucker no llama a handle_response en un WebSocket: se cuenta ahora.
+                Stats::inc(&sh.stats.bypass);
+            } else {
+                self.exchange = Exchange::Bypass;
+            }
             return req.into();
         }
 
@@ -124,8 +166,11 @@ impl HttpHandler for CacheHandler {
                 }
             } else {
                 // Vencido: se pide al origen solo si cambió (ahorra el cuerpo completo si responde 304).
+                // Antes se verifica la copia: si está dañada, un 304 no serviría de nada y hay que pedir el cuerpo.
                 let h = req.headers_mut();
-                if !h.contains_key(header::IF_NONE_MATCH) && !h.contains_key(header::IF_MODIFIED_SINCE) {
+                let client_conditional = h.contains_key(header::IF_NONE_MATCH) || h.contains_key(header::IF_MODIFIED_SINCE);
+                let has_validator = meta.etag.is_some() || meta.last_modified.is_some();
+                if !client_conditional && has_validator && sh.store.read_object(&meta).await.is_some() {
                     if let Some(v) = meta.etag.as_deref().and_then(|e| HeaderValue::from_str(e).ok()) {
                         h.insert(header::IF_NONE_MATCH, v);
                     }
@@ -137,34 +182,46 @@ impl HttpHandler for CacheHandler {
             }
         }
 
-        self.pending = Some(Arc::new(Pending { url: normalized, key, key_hash, stale }));
+        self.exchange = Exchange::Candidate(Arc::new(Pending { url: normalized, key, key_hash, stale }));
         req.into()
     }
 
     async fn handle_response(&mut self, _ctx: &HttpContext, res: Response<Body>) -> Response<Body> {
-        let Some(p) = self.pending.take() else {
-            return res;
-        };
         let sh = self.shared.clone();
+        let p = match std::mem::take(&mut self.exchange) {
+            Exchange::Untracked => return res,
+            Exchange::Bypass => {
+                Stats::inc(&sh.stats.bypass);
+                return res.map(|body| count_bypass(sh, body));
+            }
+            Exchange::Candidate(p) => p,
+        };
 
         // 1) Revalidación exitosa: el origen confirma que nuestra copia sigue válida.
         if res.status() == StatusCode::NOT_MODIFIED {
-            if let Some(meta) = &p.stale {
-                let ttl = policy::ttl_secs(res.headers(), sh.cfg.default_ttl_secs);
-                let _ = sh.store.refresh(&p.key_hash, meta, ttl).await;
-                if let Some(cached) = self.serve_from_cache(meta, "REVALIDATED").await {
-                    Stats::inc(&sh.stats.revalidated);
-                    tracing::info!(url = %p.url, "REVALIDATED (304)");
-                    return cached;
-                }
+            let Some(meta) = &p.stale else {
+                // El 304 responde a la validación que envió el propio cliente, no a la nuestra.
+                Stats::inc(&sh.stats.bypass);
+                return res;
+            };
+            let ttl = policy::ttl_secs(res.headers(), sh.cfg.default_ttl_secs);
+            let _ = sh.store.refresh(&p.key_hash, meta, ttl).await;
+            if let Some(cached) = self.serve_from_cache(meta, "REVALIDATED").await {
+                Stats::inc(&sh.stats.revalidated);
+                tracing::info!(url = %p.url, "REVALIDATED (304)");
+                return cached;
             }
-            return res;
+            // La copia se verificó al enviar la petición, pero dejó de poder leerse. El cliente
+            // no pidió un 304, así que no se le puede reenviar: recibe un error y puede reintentar.
+            Stats::inc(&sh.stats.cache_errors);
+            tracing::warn!(url = %p.url, "copia ilegible tras un 304 del origen");
+            return bad_gateway();
         }
 
         // 2) No cacheable: se reenvía tal cual, en streaming.
         if !policy::response_is_cacheable(&res, sh.cfg.max_object_bytes) {
             Stats::inc(&sh.stats.bypass);
-            return res;
+            return res.map(|body| count_bypass(sh, body));
         }
 
         // 3) Se acumula el cuerpo hasta el límite. Si lo supera, se reenvía sin guardar.
@@ -183,19 +240,18 @@ impl HttpHandler for CacheHandler {
                     }
                 }
                 Some(Err(e)) => {
+                    Stats::inc(&sh.stats.origin_errors);
                     tracing::warn!(url = %p.url, error = %e, "error leyendo cuerpo del origen");
-                    return Response::builder()
-                        .status(StatusCode::BAD_GATEWAY)
-                        .body(Body::empty())
-                        .expect("respuesta estática válida");
+                    return bad_gateway();
                 }
             }
         };
 
         if !complete {
             Stats::inc(&sh.stats.bypass);
+            Stats::add(&sh.stats.bytes_bypass, buf.len() as u64);
             let head = stream::once(async move { Ok::<Bytes, hudsucker::Error>(buf.freeze()) });
-            let rest = body.into_data_stream();
+            let rest = count_bypass(sh, body).into_data_stream();
             return Response::from_parts(parts, Body::from_stream(head.chain(rest)));
         }
 
@@ -235,5 +291,13 @@ impl HttpHandler for CacheHandler {
         parts.headers.insert(header::CONTENT_LENGTH, HeaderValue::from(bytes.len()));
         parts.headers.insert("x-rayo-cache", HeaderValue::from_static("MISS"));
         Response::from_parts(parts, Body::from(bytes))
+    }
+
+    async fn handle_error(&mut self, _ctx: &HttpContext, err: hyper_util::client::legacy::Error) -> Response<Body> {
+        if !matches!(std::mem::take(&mut self.exchange), Exchange::Untracked) {
+            Stats::inc(&self.shared.stats.origin_errors);
+        }
+        tracing::warn!(error = ?err, "no se pudo contactar al origen");
+        bad_gateway()
     }
 }

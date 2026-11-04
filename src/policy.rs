@@ -112,12 +112,28 @@ pub fn encoding_bucket(headers: &HeaderMap) -> &'static str {
     }
 }
 
-/// ¿La petición es candidata? Solo GET anónimos y completos (sin Range ni credenciales).
+/// Cabeceras que algunos orígenes usan para armar la respuesta y que no forman parte de la clave.
+/// Si se cacheara esa respuesta, un cliente podría envenenar la copia que reciben los demás.
+const UNKEYED_REQUEST_HEADERS: [&str; 7] = [
+    "forwarded",
+    "x-forwarded-host",
+    "x-forwarded-proto",
+    "x-forwarded-scheme",
+    "x-host",
+    "x-original-url",
+    "x-rewrite-url",
+];
+
+/// ¿La petición es candidata? Solo GET anónimos y completos, cuya respuesta no dependa de quién la pide.
 pub fn request_is_cacheable<B>(req: &Request<B>) -> bool {
     let h = req.headers();
     req.method() == Method::GET
         && !h.contains_key(header::AUTHORIZATION)
+        // La cookie identifica al cliente aunque el origen no marque la respuesta como privada.
+        && !h.contains_key(header::COOKIE)
         && !h.contains_key(header::RANGE)
+        && !h.contains_key(header::UPGRADE)
+        && !UNKEYED_REQUEST_HEADERS.iter().any(|name| h.contains_key(*name))
         && !cache_control_has(h, "no-store")
 }
 
@@ -223,6 +239,31 @@ mod tests {
     #[test]
     fn store_id_unifica_espejos() {
         assert_eq!(norm("https://kent.dl.sourceforge.net/x/y.iso"), norm("https://netix.dl.sourceforge.net/x/y.iso"));
+    }
+
+    #[test]
+    fn peticion_anonima_es_candidata() {
+        let req = Request::get("https://cdn.example.com/a.js").body(()).unwrap();
+        assert!(request_is_cacheable(&req));
+    }
+
+    #[test]
+    fn peticion_que_depende_del_cliente_no_es_candidata() {
+        for name in ["authorization", "cookie", "range", "upgrade", "x-forwarded-host", "forwarded", "x-original-url"] {
+            let req = Request::get("https://cdn.example.com/a.js").header(name, "x").body(()).unwrap();
+            assert!(!request_is_cacheable(&req), "{name} no debería ser cacheable");
+        }
+    }
+
+    #[test]
+    fn never_intercept_gana_sobre_intercept() {
+        let mut cfg = Config::default();
+        cfg.intercept_domains = vec!["example.com".into()];
+        cfg.never_intercept = vec!["bank.example.com".into()];
+        assert!(cfg.should_intercept("cdn.example.com"));
+        assert!(!cfg.should_intercept("online.bank.example.com"));
+        assert!(cfg.is_never_intercept("BANK.example.com."));
+        assert!(!cfg.is_never_intercept("cdn.example.com"));
     }
 
     #[test]

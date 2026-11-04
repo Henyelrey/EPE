@@ -44,6 +44,14 @@ class H(http.server.BaseHTTPRequestHandler):
             return self.send(200, b"ok")
         if path == "/private":
             return self.send(200, b"datos de sesion", {"Set-Cookie": "sid=abc", "Cache-Control": "max-age=60"})
+        if path == "/perfil":
+            # Página personal sin Cache-Control ni Set-Cookie: la cookie de la petición es la única pista.
+            who = self.headers.get("Cookie", "anonimo")
+            return self.send(200, f"perfil de {who}".encode(), {"Content-Type": "text/html"})
+        if path == "/reflect":
+            # Origen que arma la respuesta con una cabecera que no forma parte de la clave de caché.
+            host = self.headers.get("X-Forwarded-Host", "cdn.legit")
+            return self.send(200, f'<script src="//{host}/app.js"></script>'.encode(), {"Cache-Control": "max-age=60"})
         if path == "/big":
             return self.send(200, b"B" * 2_500_000, {"Cache-Control": "max-age=60"}, chunked=True)
         if path == "/__hits":

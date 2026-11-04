@@ -23,8 +23,8 @@ pub struct Config {
     pub cache_plain_http: bool,
     /// Sufijos de dominio cuyo TLS SÍ se descifra para cachear. Todo lo demás va en passthrough.
     pub intercept_domains: Vec<String>,
-    /// Sufijos que NUNCA se interceptan, aunque coincidan con la lista anterior
-    /// (bancos, apps con certificate pinning, servicios sensibles).
+    /// Sufijos que NUNCA se interceptan ni se cachean, aunque coincidan con la lista anterior
+    /// o lleguen por HTTP plano (bancos, apps con certificate pinning, servicios sensibles).
     pub never_intercept: Vec<String>,
     /// Parámetros de query que se eliminan antes de calcular la clave (tracking, cache-busters).
     pub strip_query_params: Vec<String>,
@@ -103,12 +103,22 @@ impl Config {
     }
 
     pub fn should_intercept(&self, host: &str) -> bool {
-        let host = host.trim_end_matches('.').to_ascii_lowercase();
-        if self.never_intercept.iter().any(|s| matches_suffix(&host, s)) {
+        if self.is_never_intercept(host) {
             return false;
         }
+        let host = canonical_host(host);
         self.intercept_domains.iter().any(|s| matches_suffix(&host, s))
     }
+
+    /// Dominios protegidos: no se descifran ni se cachean, tampoco por HTTP plano.
+    pub fn is_never_intercept(&self, host: &str) -> bool {
+        let host = canonical_host(host);
+        self.never_intercept.iter().any(|s| matches_suffix(&host, s))
+    }
+}
+
+fn canonical_host(host: &str) -> String {
+    host.trim_end_matches('.').to_ascii_lowercase()
 }
 
 /// `a.b.example.com` coincide con `example.com`, pero `badexample.com` no.

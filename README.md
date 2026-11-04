@@ -32,9 +32,11 @@ Navegador ──CONNECT host:443──▶ rayo-cache
 ```
 
 Reglas de seguridad incluidas:
-- Nunca guarda respuestas con `Set-Cookie`, `Cache-Control: private/no-store`, `Vary` distinto de `Accept-Encoding`, ni peticiones con `Authorization`.
+- Nunca guarda respuestas con `Set-Cookie`, `Cache-Control: private/no-store` ni `Vary` distinto de `Accept-Encoding`.
+- Nunca guarda ni sirve desde caché peticiones con `Authorization`, `Cookie` o cabeceras como `X-Forwarded-Host`, que permitirían envenenar la copia compartida. Esa lista no cubre cualquier cabecera que un origen pueda reflejar.
+- `never_intercept` también vale para HTTP plano: esos dominios no se descifran ni se cachean.
 - Doble filtro de intercepción: en el `CONNECT` y sobre el SNI real del `ClientHello`.
-- Cada objeto se verifica contra su SHA-256 antes de servirse; si el disco fue alterado, se descarta.
+- Cada objeto se verifica contra su SHA-256 antes de servirse; si el disco fue alterado, se borra y se vuelve a descargar.
 - Escrituras atómicas (temporal + rename): un corte de luz no deja objetos a medias.
 - Objetos más grandes que `max_object_bytes` pasan en streaming sin cargar todo en memoria.
 
@@ -62,13 +64,21 @@ cargo build --release
 
 `RUST_LOG=rayo_cache=debug` muestra cada decisión de intercepción.
 
+### Cómo leer las estadísticas
+
+- Sin peticiones en curso, `requests` = `hits` + `misses` + `revalidated_304` + `bypass` + `origin_errors` + `cache_errors`.
+- `byte_hit_ratio` = `bytes_from_cache` / (`bytes_from_cache` + `bytes_from_origin` + `bytes_bypass`).
+- El tráfico en passthrough no entra en ese ratio: Hudsucker no expone sus bytes. Solo se cuentan las conexiones, en `tls_passthrough`.
+
 ## Probar
 
 ```bash
-cargo test                       # normalización de claves y sufijos
-echo "127.0.0.1 lab.test other.test" | sudo tee -a /etc/hosts
-./e2e/run.sh                     # origen de laboratorio + proxy: MISS, HIT, dedup, 304, passthrough
+cargo test                       # claves, reglas de caché, integridad del almacén y contadores
+cargo build --release
+./e2e/run.sh                     # origen de laboratorio + proxy; termina con error si algo falla
 ```
+
+El e2e requiere bash, `openssl`, `python3` y `curl`, y usa los puertos 3129, 8080 y 8443. En Windows se ejecuta desde Git Bash.
 
 Resultado verificado en el entorno de desarrollo: HIT/MISS correctos, deduplicación entre URLs y entre
 HTTP/HTTPS, revalidación 304, persistencia tras reinicio (HIT desde disco) y 400 peticiones concurrentes
