@@ -46,6 +46,10 @@ pub struct Config {
     pub store_id: Vec<StoreIdRule>,
     /// Host virtual que devuelve estadísticas en JSON: http://rayo.stats/
     pub stats_host: String,
+    /// Host virtual con el aviso de transparencia para los usuarios: http://rayo.aviso/
+    pub notice_host: String,
+    /// Cómo contactar a quien administra el proxy. Se muestra en el aviso.
+    pub operator_contact: String,
     /// CAs adicionales en las que confiar al conectar con orígenes (intranet, laboratorio).
     pub upstream_extra_ca: Vec<PathBuf>,
 }
@@ -100,6 +104,8 @@ impl Default for Config {
                 replace: "https://dl.sourceforge.net.rayo/$1".into(),
             }],
             stats_host: "rayo.stats".into(),
+            notice_host: "rayo.aviso".into(),
+            operator_contact: String::new(),
             upstream_extra_ca: vec![],
         }
     }

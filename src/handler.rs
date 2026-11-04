@@ -25,6 +25,8 @@ pub struct Shared {
     pub destinations: Arc<DestinationPolicy>,
     pub memory: MemoryBudget,
     pub flights: Flights,
+    /// Página de http://rayo.aviso/, generada al arrancar.
+    pub notice: Bytes,
 }
 
 /// Lo que se recuerda entre `handle_request` y `handle_response` del mismo intercambio.
@@ -118,6 +120,17 @@ impl CacheHandler {
         Response::builder()
             .header(header::CONTENT_TYPE, "application/json")
             .body(Body::from(json))
+            .expect("respuesta estática válida")
+    }
+
+    fn notice_response(&self) -> Response<Body> {
+        Response::builder()
+            .header(header::CONTENT_TYPE, "text/html; charset=utf-8")
+            // La página no necesita scripts ni recursos externos: se prohíben por completo.
+            .header(header::CONTENT_SECURITY_POLICY, "default-src 'none'; style-src 'unsafe-inline'")
+            .header(header::X_CONTENT_TYPE_OPTIONS, "nosniff")
+            .header(header::CACHE_CONTROL, "no-store")
+            .body(Body::from(self.shared.notice.clone()))
             .expect("respuesta estática válida")
     }
 
@@ -216,6 +229,9 @@ impl HttpHandler for CacheHandler {
         };
         if url.hostname() == sh.cfg.stats_host {
             return self.stats_response().into();
+        }
+        if url.hostname() == sh.cfg.notice_host {
+            return self.notice_response().into();
         }
         Stats::inc(&sh.stats.requests);
 

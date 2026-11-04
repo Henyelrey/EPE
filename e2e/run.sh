@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Prueba de punta a punta: origen de laboratorio (HTTP :8080 / HTTPS :8443) + varios proxies en :3129-3133.
+# Prueba de punta a punta: origen de laboratorio (HTTP :8080 / HTTPS :8443) + varios proxies en :3129-3135.
 # Requiere: openssl, python3 y curl. No hace falta tocar el archivo hosts: usa localhost (se intercepta)
 # y 127.0.0.1 (no se intercepta). Sale con código 1 si alguna verificación falla.
 #
@@ -22,12 +22,14 @@ openssl_literal req -newkey rsa:2048 -nodes -keyout origin.key -out origin.csr -
 printf "subjectAltName=DNS:localhost,IP:127.0.0.1\nbasicConstraints=CA:FALSE\nextendedKeyUsage=serverAuth\n" > ext.cnf
 openssl x509 -req -in origin.csr -CA origin-ca.pem -CAkey origin-ca.key -CAcreateserial -out origin.pem -days 2 -extfile ext.cnf 2>/dev/null
 
-# Escribe config.<nombre>.toml. Se puede ajustar con LISTEN, CLIENTS, RATE, INTERNAL, BUDGET y DOMAINS.
+# Escribe config.<nombre>.toml. Se puede ajustar con LISTEN, CLIENTS, RATE, INTERNAL, BUDGET, DOMAINS y CONTACT.
 write_config() {
   local listen="${LISTEN:-127.0.0.1:$2}" clients="${CLIENTS:-[\"127.0.0.1/32\", \"::1/128\"]}"
   local internal="${INTERNAL:-[\"127.0.0.0/8\", \"::1/128\"]}" domains="${DOMAINS:-[\"localhost\"]}"
+  local contact="${CONTACT:-redes@example.invalid}"
   cat > "config.$1.toml" <<EOF
 listen = "$listen"
+operator_contact = "$contact"
 allowed_clients = $clients
 rate_limit_per_minute = ${RATE:-0}
 allowed_internal_networks = $internal
@@ -68,6 +70,8 @@ CLIENTS='["192.0.2.0/24"]' start_proxy denied 3130
 RATE=5 start_proxy limited 3131
 INTERNAL='[]' start_proxy strict 3132
 DOMAINS='[]' BUDGET=1024 start_proxy tight 3133
+RUST_LOG=rayo_cache=debug CONTACT='<script>alert(1)</script>' start_proxy detailed 3134
+RUST_LOG=info start_proxy verbose 3135
 
 FAILS=0
 expect() { # descripción, esperado, obtenido
@@ -246,6 +250,41 @@ expect "abierto a todo Internet"             "1" "$(startup_exit todo-internet)"
 DOMAINS='["otro.invalid"]' write_config fuera-de-la-ca 3142
 expect "dominio que la CA no puede firmar"   "1" "$(startup_exit fuera-de-la-ca)"
 expect "y explica cómo resolverlo"           "1" "$(grep -c 'no puede firmar' fuera-de-la-ca.log)"
+
+section "15. Aviso de transparencia"
+PX=http://127.0.0.1:3129
+before=$(metric requests)
+page=$(body http://rayo.aviso/)
+headers=$(curlx -o /dev/null -D - http://rayo.aviso/)
+fp=$(openssl x509 -in ca/rayo-ca.crt -noout -fingerprint -sha256 | cut -d= -f2 | tr -d '\r')
+has() { if echo "$1" | grep -qF -- "$2"; then echo si; else echo no; fi; }
+# Líneas del registro con la IP de un cliente, sin los códigos de color del log.
+client_ip_lines() { sed 's/\x1b\[[0-9;]*m//g' "$1" | grep -cE '(^|[^a-z_])client(_addr)?='; }
+expect "se sirve como HTML"                  "si" "$(has "$headers" 'text/html; charset=utf-8')"
+expect "prohíbe scripts y recursos externos" "si" "$(has "$headers" "default-src 'none'")"
+expect "muestra los dominios que se descifran" "si" "$(has "$page" '<code>localhost</code>')"
+expect "muestra los dominios protegidos"     "si" "$(has "$page" '<code>127.0.0.1</code>')"
+expect "advierte sobre las contraseñas"      "si" "$(has "$page" 'incluidas contraseñas')"
+expect "indica a quién acudir"               "si" "$(has "$page" 'redes@example.invalid')"
+expect "su huella coincide con la del certificado" "si" "$(has "$page" "$fp")"
+expect "indica que el registro detallado está apagado" "si" "$(has "$page" 'Registro detallado: desactivado')"
+expect "no cuenta como petición de contenido" "$before" "$(metric requests)"
+expect "el registro por defecto no incluye IPs de clientes" "0" "$(client_ip_lines e2e.log)"
+PX=http://127.0.0.1:3135
+px http://localhost:8080/static.js >/dev/null
+page=$(body http://rayo.aviso/)
+expect "con RUST_LOG=info el registro sí incluye IPs" "si" "$([ "$(client_ip_lines verbose.log)" -gt 0 ] && echo si || echo no)"
+expect "y entonces el aviso lo indica"       "si" "$(has "$page" 'Registro detallado: activado')"
+PX=http://127.0.0.1:3130
+expect "un cliente no permitido no puede verlo" "403 -" "$(px http://rayo.aviso/)"
+PX=http://127.0.0.1:3133
+page=$(body http://rayo.aviso/)
+expect "sin dominios configurados no inventa datos" "si" "$(has "$page" '<p>Ninguno.</p>')"
+PX=http://127.0.0.1:3134
+page=$(body http://rayo.aviso/)
+expect "avisa si el registro detallado está activo" "si" "$(has "$page" 'Registro detallado: activado')"
+expect "escapa los datos de la configuración" "no" "$(has "$page" '<script>')"
+expect "y los muestra como texto"            "si" "$(has "$page" '&lt;script&gt;')"
 
 echo
 if [ "$FAILS" -eq 0 ]; then

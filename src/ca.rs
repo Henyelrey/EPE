@@ -11,6 +11,7 @@ use rcgen::{
     BasicConstraints, CertificateParams, DistinguishedName, DnType, GeneralSubtree, IsCa, Issuer, KeyPair,
     KeyUsagePurpose, NameConstraints,
 };
+use sha2::{Digest, Sha256};
 use std::path::Path;
 use x509_parser::extensions::GeneralName;
 use x509_parser::pem::parse_x509_pem;
@@ -53,6 +54,24 @@ pub fn load_or_generate(cert_path: &Path, key_path: &Path, intercept_domains: &[
     let issuer = Issuer::from_ca_cert_pem(&cert_pem, key).context("certificado de la CA inválido")?;
     // 1000 = certificados por dominio cacheados en memoria.
     Ok(RcgenAuthority::new(issuer, 1_000, aws_lc_rs::default_provider()))
+}
+
+/// Lo que cualquier usuario puede comprobar sobre el certificado que instaló.
+pub struct CaSummary {
+    /// Dominios para los que puede firmar, o `None` si no tiene límites.
+    pub permitted: Option<Vec<String>>,
+    /// Huella SHA-256, en el mismo formato que muestra `openssl x509 -fingerprint -sha256`.
+    pub fingerprint: String,
+}
+
+pub fn summary(cert_path: &Path) -> anyhow::Result<CaSummary> {
+    let cert_pem = std::fs::read_to_string(cert_path).context("leyendo certificado de la CA")?;
+    let (_, pem) = parse_x509_pem(cert_pem.as_bytes()).context("certificado de la CA inválido")?;
+    let hex = hex::encode_upper(Sha256::digest(&pem.contents));
+    let fingerprint = hex.as_bytes().chunks(2).map(|c| String::from_utf8_lossy(c).into_owned()).collect::<Vec<_>>().join(":");
+    let permitted = permitted_domains(&cert_pem)?
+        .map(|domains| domains.into_iter().filter(|d| d != NO_DOMAINS_PLACEHOLDER).collect());
+    Ok(CaSummary { permitted, fingerprint })
 }
 
 fn generate(cert_path: &Path, key_path: &Path, intercept_domains: &[String]) -> anyhow::Result<()> {
@@ -197,6 +216,9 @@ mod tests {
         generate(&cert, &key, &[]).unwrap();
         let pem = std::fs::read_to_string(&cert).unwrap();
         assert_eq!(permitted_domains(&pem).unwrap().unwrap(), [NO_DOMAINS_PLACEHOLDER]);
+        let summary = summary(&cert).unwrap();
+        assert_eq!(summary.permitted, Some(vec![]));
+        assert_eq!(summary.fingerprint.len(), 95, "32 bytes en hexadecimal separados por dos puntos");
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }

@@ -65,9 +65,9 @@ cargo build --release
    - **Windows (PowerShell admin):** `certutil -addstore -f ROOT ca\rayo-ca.crt`
    - **Firefox** usa su propio almacén: Ajustes → Privacidad y seguridad → Certificados → Importar.
 4. **Configura el proxy** `127.0.0.1:3128` para HTTP y HTTPS (navegador o sistema).
-5. **Mira las estadísticas** en `http://rayo.stats/` (con el proxy activo).
+5. **Mira las estadísticas** en `http://rayo.stats/` y el aviso para usuarios en `http://rayo.aviso/` (con el proxy activo). Escribe `http://` completo: los navegadores tratan esos nombres como búsquedas y no existen por HTTPS.
 
-`RUST_LOG=rayo_cache=debug` muestra cada decisión de intercepción.
+`RUST_LOG=rayo_cache=debug` muestra cada decisión de intercepción. Ese modo y filtros como `RUST_LOG=info` pueden escribir en el registro la IP de los clientes y los dominios a los que se conectan; si los usas, el aviso de `http://rayo.aviso/` lo indica.
 
 ### Usarlo en una red compartida
 
@@ -82,6 +82,7 @@ Por defecto solo acepta conexiones de este mismo equipo. Para abrirlo a tu red:
    El proxy no arranca si `listen` no es local y `allowed_clients` solo permite este equipo, ni si incluye a todo Internet (`0.0.0.0/0`). La IP no identifica a una persona: cualquiera dentro de la subred puede usarlo.
 3. **Si necesitan llegar a una intranet** a través del proxy, agrega sus redes a `allowed_internal_networks`. Todo lo interno está bloqueado por defecto.
 4. **Si generaste una CA con una versión anterior,** el proxy avisa al arrancar de que no tiene límites. Bórrala de cada dispositivo (en Windows: `certutil -delstore ROOT "Rayo Cache Local CA"`), borra `ca/`, arranca para generar otra y reinstálala.
+5. **Avisa a los usuarios antes de que instalen la CA.** Completa `operator_contact` en `config.toml` y entrega la plantilla [docs/AVISO.md](docs/AVISO.md). Cualquier cliente permitido puede comprobar en `http://rayo.aviso/` los dominios que se descifran, si el registro detallado está activo y la huella del certificado. La página se genera con la configuración real al arrancar.
 
 Un cliente permitido todavía puede abrir túneles a cualquier puerto de una IP pública.
 
@@ -101,7 +102,7 @@ cargo build --release
 ./e2e/run.sh                     # origen de laboratorio + proxy; termina con error si algo falla
 ```
 
-El e2e requiere bash, `openssl`, `python3` y `curl`, y usa los puertos 3129-3133, 8080 y 8443. En Windows se ejecuta desde Git Bash.
+El e2e requiere bash, `openssl`, `python3` y `curl`, y usa los puertos 3129-3135, 8080 y 8443. En Windows se ejecuta desde Git Bash.
 
 El e2e verifica, entre otras cosas, que 20 peticiones simultáneas a un objeto nuevo causan 1 sola descarga al origen. No prueba clientes en otras máquinas ni navegadores: conviene probar la CA limitada en los navegadores de tu red antes de repartirla.
 

@@ -10,6 +10,7 @@ mod coalesce;
 mod config;
 mod handler;
 mod memory;
+mod notice;
 mod policy;
 mod stats;
 mod store;
@@ -39,16 +40,26 @@ async fn main() -> anyhow::Result<()> {
     let normalizer = policy::KeyNormalizer::new(&cfg)?;
     let connector = upstream::connector(&cfg.upstream_extra_ca, destinations.clone(), stats.clone())?;
 
+    // Hudsucker anota la IP del cliente en sus spans de nivel INFO: con un filtro como RUST_LOG=info,
+    // esa IP acompaña a cada línea del registro aunque rayo-cache no esté en modo debug.
+    let detailed_logs = tracing::enabled!(target: "rayo_cache", tracing::Level::DEBUG)
+        || tracing::enabled!(target: "hudsucker::proxy::internal", tracing::Level::INFO);
+    let notice = notice::render(&cfg, &ca::summary(&cfg.ca_cert)?, detailed_logs).into();
+
     tracing::info!(
-        "escuchando en {addr} | clientes permitidos: {:?} | intercepta TLS de {} dominio(s), el resto va en passthrough | stats: http://{}/",
+        "escuchando en {addr} | clientes permitidos: {:?} | intercepta TLS de {} dominio(s), el resto va en passthrough | stats: http://{}/ | aviso: http://{}/",
         cfg.allowed_clients,
         cfg.intercept_domains.len(),
-        cfg.stats_host
+        cfg.stats_host,
+        cfg.notice_host
     );
+    if !addr.ip().is_loopback() && cfg.operator_contact.trim().is_empty() {
+        tracing::warn!("operator_contact está vacío: el aviso no dirá a quién acudir. Complétalo en una red compartida.");
+    }
 
     let memory = memory::MemoryBudget::new(cfg.max_buffered_bytes);
     let flights = coalesce::Flights::new(cfg.coalesce_wait_secs);
-    let shared = Arc::new(Shared { cfg, store, stats, normalizer, clients, destinations, memory, flights });
+    let shared = Arc::new(Shared { cfg, store, stats, normalizer, clients, destinations, memory, flights, notice });
 
     let proxy = Proxy::builder()
         .with_addr(addr)
