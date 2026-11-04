@@ -8,10 +8,12 @@ mod access;
 mod access_log;
 mod admin;
 mod ca;
+mod clients;
 mod coalesce;
 mod config;
 mod handler;
 mod memory;
+mod monitor;
 mod notice;
 mod policy;
 mod secure;
@@ -21,7 +23,7 @@ mod upstream;
 
 use handler::{CacheHandler, Shared};
 use hudsucker::Proxy;
-use std::{net::SocketAddr, path::PathBuf, sync::Arc, time::Duration};
+use std::{net::SocketAddr, path::PathBuf, sync::Arc};
 use tracing_subscriber::EnvFilter;
 
 #[tokio::main]
@@ -39,7 +41,8 @@ async fn main() -> anyhow::Result<()> {
     let stats = Arc::new(stats::Stats::default());
 
     let ca = ca::load_or_generate(&cfg.ca_cert, &cfg.ca_key, &cfg.intercept_domains)?;
-    let store = store::Store::open(&cfg.data_dir, cfg.mem_index_entries, stats.clone()).await?;
+    monitor::restore_stats(&cfg.data_dir, &stats).await;
+    let store = store::Store::open(&cfg.data_dir, cfg.mem_index_entries, cfg.max_disk_bytes, stats.clone()).await?;
     let normalizer = policy::KeyNormalizer::new(&cfg)?;
     let connector = upstream::connector(&cfg.upstream_extra_ca, destinations.clone(), stats.clone())?;
 
@@ -47,7 +50,8 @@ async fn main() -> anyhow::Result<()> {
     // esa IP acompaña a cada línea del registro aunque rayo-cache no esté en modo debug.
     let detailed_logs = tracing::enabled!(target: "rayo_cache", tracing::Level::DEBUG)
         || tracing::enabled!(target: "hudsucker::proxy::internal", tracing::Level::INFO);
-    let notice = notice::render(&cfg, &ca::summary(&cfg.ca_cert)?, detailed_logs).into();
+    let ca_summary = ca::summary(&cfg.ca_cert)?;
+    let notice = notice::render(&cfg, &ca_summary, detailed_logs).into();
 
     tracing::info!(
         "escuchando en {addr} | clientes permitidos: {:?} | intercepta TLS de {} dominio(s), el resto va en passthrough | stats: http://{}/ | aviso: http://{}/",
@@ -67,13 +71,24 @@ async fn main() -> anyhow::Result<()> {
         );
     }
 
-    let access_log = access_log::AccessLog::start(&cfg, stats.clone())?;
-    admin::start(&cfg, stats.clone()).await?;
-    store::watch_disk(cfg.data_dir.clone(), stats.clone(), Duration::from_secs(cfg.disk_scan_interval_secs.max(1)));
+    if cfg.client_stats_enabled {
+        tracing::info!("totales por cliente activos, solo en memoria. El aviso a los usuarios lo indica.");
+    }
+    if cfg.max_disk_bytes > 0 && cfg.max_disk_bytes < cfg.max_object_bytes as u64 {
+        tracing::warn!("max_disk_bytes es menor que max_object_bytes: un objeto grande expulsaría toda la caché.");
+    }
 
+    let access_log = access_log::AccessLog::start(&cfg, stats.clone())?;
+    let client_stats = Arc::new(clients::ClientStats::new(cfg.client_stats_enabled));
+    let health = Arc::new(monitor::Monitor::new(ca_summary.not_after));
+    admin::start(&cfg, stats.clone(), health.clone(), client_stats.clone()).await?;
+    monitor::start(&cfg, stats.clone(), client_stats.clone(), health);
+
+    let data_dir = cfg.data_dir.clone();
+    let final_stats = stats.clone();
     let memory = memory::MemoryBudget::new(cfg.max_buffered_bytes);
     let flights = coalesce::Flights::new(cfg.coalesce_wait_secs);
-    let shared = Arc::new(Shared { cfg, store, stats, normalizer, clients, destinations, memory, flights, access_log, notice });
+    let shared = Arc::new(Shared { cfg, store, stats, normalizer, clients, destinations, memory, flights, access_log, client_stats, notice });
 
     let proxy = Proxy::builder()
         .with_addr(addr)
@@ -85,6 +100,8 @@ async fn main() -> anyhow::Result<()> {
         })
         .build()?;
 
-    proxy.start().await?;
+    let result = proxy.start().await;
+    monitor::save_stats(&data_dir, &final_stats).await;
+    result?;
     Ok(())
 }

@@ -4,6 +4,7 @@ import http.server, ssl, threading, json, sys, os, time
 HITS = {}
 LIB = b"/* libreria */ " + b"x" * 50_000
 DYN = {"etag": '"v1"', "body": b'{"precio": 42, "version": 1}'}
+MUTABLE = {"version": 1}
 
 
 class H(http.server.BaseHTTPRequestHandler):
@@ -41,6 +42,15 @@ class H(http.server.BaseHTTPRequestHandler):
             return self.send(200, DYN["body"], {"Content-Type": "application/json", "Cache-Control": "no-cache", "ETag": DYN["etag"]})
         if path == "/dyn-change":
             DYN["etag"], DYN["body"] = '"v2"', b'{"precio": 45, "version": 2}'
+            return self.send(200, b"ok")
+        if path.startswith("/blob/"):
+            # Objetos del mismo tamaño y distinto contenido, para llenar el disco.
+            return self.send(200, path.encode() + b"x" * 50_000, {"Cache-Control": "max-age=300"})
+        if path == "/mutable":
+            # Se guarda pero nunca se sirve sin preguntar: cada petición puede traer contenido nuevo.
+            return self.send(200, f"version {MUTABLE['version']}".encode(), {"Cache-Control": "no-cache"})
+        if path == "/mutable-change":
+            MUTABLE["version"] += 1
             return self.send(200, b"ok")
         if path == "/private":
             return self.send(200, b"datos de sesion", {"Set-Cookie": "sid=abc", "Cache-Control": "max-age=60"})

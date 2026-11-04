@@ -63,16 +63,19 @@ pub struct CaSummary {
     pub permitted: Option<Vec<String>>,
     /// Huella SHA-256, en el mismo formato que muestra `openssl x509 -fingerprint -sha256`.
     pub fingerprint: String,
+    /// Fecha de vencimiento, en segundos desde 1970.
+    pub not_after: i64,
 }
 
 pub fn summary(cert_path: &Path) -> anyhow::Result<CaSummary> {
     let cert_pem = std::fs::read_to_string(cert_path).context("leyendo certificado de la CA")?;
     let (_, pem) = parse_x509_pem(cert_pem.as_bytes()).context("certificado de la CA inválido")?;
+    let not_after = pem.parse_x509().context("certificado de la CA inválido")?.validity().not_after.timestamp();
     let hex = hex::encode_upper(Sha256::digest(&pem.contents));
     let fingerprint = hex.as_bytes().chunks(2).map(|c| String::from_utf8_lossy(c).into_owned()).collect::<Vec<_>>().join(":");
     let permitted = permitted_domains(&cert_pem)?
         .map(|domains| domains.into_iter().filter(|d| d != NO_DOMAINS_PLACEHOLDER).collect());
-    Ok(CaSummary { permitted, fingerprint })
+    Ok(CaSummary { permitted, fingerprint, not_after })
 }
 
 fn generate(cert_path: &Path, key_path: &Path, intercept_domains: &[String]) -> anyhow::Result<()> {

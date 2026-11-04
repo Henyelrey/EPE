@@ -56,8 +56,19 @@ pub struct Config {
     pub admin_listen: String,
     /// Archivo con el token de administración. Si no existe, se genera al arrancar.
     pub admin_token_file: PathBuf,
-    /// Cada cuántos segundos se mide el uso de disco.
-    pub disk_scan_interval_secs: u64,
+    /// Espacio máximo de la caché en disco. Al llegar a él se borra lo usado hace más tiempo (0 = sin límite).
+    pub max_disk_bytes: u64,
+    /// Cada cuántos segundos se guardan los contadores y se evalúan las alertas.
+    pub maintenance_interval_secs: u64,
+    /// Alerta si el volumen de la caché tiene menos de este porcentaje libre.
+    pub alert_disk_free_percent: u64,
+    /// Alerta cuando a la CA le queden estos días o menos.
+    pub alert_ca_days: u64,
+    /// Alerta si este porcentaje de las peticiones recientes no pudo contactar al origen.
+    pub alert_origin_error_percent: u64,
+    /// Totales por cliente en memoria, visibles solo con el token. Apagado por defecto:
+    /// son datos sobre personas. El aviso de transparencia indica si está activo.
+    pub client_stats_enabled: bool,
     /// Log de acceso por petición. Apagado por defecto: registra actividad de personas, y
     /// activarlo debe ser una decisión deliberada. El aviso de transparencia indica si está activo.
     pub access_log_enabled: bool,
@@ -133,7 +144,12 @@ impl Default for Config {
             upstream_extra_ca: vec![],
             admin_listen: "127.0.0.1:9128".into(),
             admin_token_file: "./ca/admin.token".into(),
-            disk_scan_interval_secs: 300,
+            max_disk_bytes: 10 * 1024 * 1024 * 1024,
+            maintenance_interval_secs: 60,
+            alert_disk_free_percent: 10,
+            alert_ca_days: 30,
+            alert_origin_error_percent: 20,
+            client_stats_enabled: false,
             access_log_enabled: false,
             access_log_dir: "./logs".into(),
             access_log_retention_days: 7,
@@ -197,6 +213,7 @@ mod tests {
     fn una_configuracion_anterior_no_activa_el_log_de_acceso() {
         let old: Config = toml::from_str("listen = \"127.0.0.1:3128\"").unwrap();
         assert!(!old.access_log_enabled);
+        assert!(!old.client_stats_enabled);
         assert_eq!(old.access_log_retention_days, 7);
     }
 

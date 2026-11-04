@@ -1,4 +1,5 @@
 //! Contadores en vivo, expuestos en http://rayo.stats/ y en /metrics del puerto de administración.
+//! Se guardan en disco cada cierto tiempo, salvo los histogramas de latencia, que empiezan de cero al arrancar.
 //!
 //! Con el proxy sin peticiones en curso, se cumple:
 //! requests = hits + misses + revalidated + bypass + origin_errors + cache_errors
@@ -63,6 +64,16 @@ impl Histogram {
         let index = LATENCY_BUCKETS_MS.iter().position(|ms| micros <= ms * 1000).unwrap_or(LATENCY_BUCKETS_MS.len());
         self.buckets[index].fetch_add(1, Relaxed);
         self.sum_micros.fetch_add(micros, Relaxed);
+    }
+
+    fn count(&self) -> u64 {
+        self.buckets.iter().map(|b| b.load(Relaxed)).sum()
+    }
+
+    fn summary(&self) -> serde_json::Value {
+        let count = self.count();
+        let avg_ms = if count == 0 { 0.0 } else { self.sum_micros.load(Relaxed) as f64 / count as f64 / 1000.0 };
+        serde_json::json!({ "count": count, "avg_ms": avg_ms })
     }
 
     fn write_prometheus(&self, out: &mut String, result: &str) {
@@ -134,9 +145,18 @@ pub struct Stats {
     /// Líneas del log de acceso perdidas porque el disco no daba abasto o falló la escritura.
     pub access_log_dropped: AtomicU64,
     pub access_log_errors: AtomicU64,
-    /// Última medición del disco: bytes de objetos y metadatos, y cantidad de objetos.
+    /// Lo que ocupa la caché: bytes de objetos y metadatos, y cantidad de objetos.
     pub disk_used_bytes: AtomicU64,
     pub disk_objects: AtomicU64,
+    pub disk_limit_bytes: AtomicU64,
+    /// Última medición del volumen donde está la caché.
+    pub disk_free_bytes: AtomicU64,
+    pub disk_total_bytes: AtomicU64,
+    /// Entradas y bytes expulsados por el límite de disco.
+    pub evicted_entries: AtomicU64,
+    pub evicted_bytes: AtomicU64,
+    /// Fecha del primer arranque que empezó a sumar estos contadores.
+    pub since: AtomicU64,
     pub latency: Latency,
 }
 
@@ -180,6 +200,18 @@ pub struct Snapshot {
     disk_used_bytes: u64,
     #[serde(skip)]
     disk_objects: u64,
+    #[serde(skip)]
+    disk_limit_bytes: u64,
+    #[serde(skip)]
+    disk_free_bytes: u64,
+    #[serde(skip)]
+    disk_total_bytes: u64,
+    #[serde(skip)]
+    evicted_entries: u64,
+    #[serde(skip)]
+    evicted_bytes: u64,
+    #[serde(skip)]
+    since: u64,
 }
 
 fn ratio(part: u64, total: u64) -> f64 {
@@ -266,7 +298,113 @@ impl Stats {
             access_log_errors: self.access_log_errors.load(Relaxed),
             disk_used_bytes: self.disk_used_bytes.load(Relaxed),
             disk_objects: self.disk_objects.load(Relaxed),
+            disk_limit_bytes: self.disk_limit_bytes.load(Relaxed),
+            disk_free_bytes: self.disk_free_bytes.load(Relaxed),
+            disk_total_bytes: self.disk_total_bytes.load(Relaxed),
+            evicted_entries: self.evicted_entries.load(Relaxed),
+            evicted_bytes: self.evicted_bytes.load(Relaxed),
+            since: self.since.load(Relaxed),
         }
+    }
+
+    /// Lo que se conserva entre reinicios. Las medidas del disco no: se vuelven a tomar al arrancar.
+    fn persistent(&self) -> [(&'static str, &AtomicU64); 26] {
+        [
+            ("since", &self.since),
+            ("requests", &self.requests),
+            ("hits", &self.hits),
+            ("misses", &self.misses),
+            ("revalidated", &self.revalidated),
+            ("bypass", &self.bypass),
+            ("origin_errors", &self.origin_errors),
+            ("cache_errors", &self.cache_errors),
+            ("stored_new", &self.stored_new),
+            ("dedup", &self.dedup),
+            ("bytes_from_cache", &self.bytes_from_cache),
+            ("bytes_from_origin", &self.bytes_from_origin),
+            ("bytes_bypass", &self.bytes_bypass),
+            ("tls_intercepted", &self.tls_intercepted),
+            ("tls_passthrough", &self.tls_passthrough),
+            ("denied_clients", &self.denied_clients),
+            ("rate_limited", &self.rate_limited),
+            ("blocked_destinations", &self.blocked_destinations),
+            ("over_budget", &self.over_budget),
+            ("coalesced", &self.coalesced),
+            ("corrupt_objects", &self.corrupt_objects),
+            ("store_write_errors", &self.store_write_errors),
+            ("access_log_dropped", &self.access_log_dropped),
+            ("access_log_errors", &self.access_log_errors),
+            ("evicted_entries", &self.evicted_entries),
+            ("evicted_bytes", &self.evicted_bytes),
+        ]
+    }
+
+    pub fn saved_json(&self) -> String {
+        let values: std::collections::BTreeMap<&str, u64> = self.persistent().iter().map(|(name, value)| (*name, value.load(Relaxed))).collect();
+        serde_json::to_string_pretty(&values).unwrap_or_default()
+    }
+
+    /// Recupera lo guardado. Un archivo dañado no cambia nada; un contador desconocido se ignora.
+    pub fn restore(&self, text: &str) -> serde_json::Result<()> {
+        let values: std::collections::HashMap<String, u64> = serde_json::from_str(text)?;
+        for (name, counter) in self.persistent() {
+            if let Some(value) = values.get(name) {
+                counter.store(*value, Relaxed);
+            }
+        }
+        Ok(())
+    }
+
+    /// Anota la fecha de inicio la primera vez que se empieza a contar.
+    pub fn mark_started(&self) {
+        let _ = self.since.compare_exchange(0, crate::store::now(), Relaxed, Relaxed);
+    }
+
+    /// Datos del panel. No incluye nada por cliente.
+    pub fn panel_json(&self) -> serde_json::Value {
+        let s = self.snapshot();
+        serde_json::json!({
+            "since": s.since,
+            "uptime_secs": s.uptime_secs,
+            "requests": s.requests,
+            "request_hit_ratio": s.request_hit_ratio,
+            "byte_hit_ratio": s.byte_hit_ratio,
+            "results": {
+                "hit": s.hits,
+                "revalidated": s.revalidated_304,
+                "miss": s.misses,
+                "bypass": s.bypass,
+                "origin_error": s.origin_errors,
+                "cache_error": s.cache_errors,
+            },
+            "bytes": { "cache": s.bytes_from_cache, "origin": s.bytes_from_origin, "bypass": s.bytes_bypass },
+            "latency": {
+                "hit": self.latency.hit.summary(),
+                "revalidated": self.latency.revalidated.summary(),
+                "miss": self.latency.miss.summary(),
+                "bypass": self.latency.bypass.summary(),
+                "error": self.latency.error.summary(),
+            },
+            "disk": {
+                "used": s.disk_used_bytes,
+                "limit": s.disk_limit_bytes,
+                "objects": s.disk_objects,
+                "free": s.disk_free_bytes,
+                "total": s.disk_total_bytes,
+                "evicted_entries": s.evicted_entries,
+                "evicted_bytes": s.evicted_bytes,
+            },
+            "tls": { "intercepted": s.tls_intercepted, "passthrough": s.tls_passthrough },
+            "rejections": { "client": s.denied_clients, "rate_limit": s.rate_limited, "destination": s.blocked_destinations },
+            "health": {
+                "corrupt_objects": s.corrupt_objects,
+                "store_write_errors": s.store_write_errors,
+                "over_budget": s.over_budget,
+                "coalesced": s.coalesced,
+                "access_log_dropped": s.access_log_dropped,
+                "access_log_errors": s.access_log_errors,
+            },
+        })
     }
 
     /// Métricas en el formato de texto de Prometheus.
@@ -325,8 +463,13 @@ impl Stats {
         single(&mut out, "rayo_store_write_errors_total", "counter", "Respuestas que no se pudieron guardar en disco.", s.store_write_errors);
         single(&mut out, "rayo_access_log_dropped_total", "counter", "Líneas del log de acceso perdidas por saturación.", s.access_log_dropped);
         single(&mut out, "rayo_access_log_errors_total", "counter", "Errores al escribir el log de acceso.", s.access_log_errors);
-        single(&mut out, "rayo_disk_used_bytes", "gauge", "Bytes de objetos y metadatos en la última medición.", s.disk_used_bytes);
-        single(&mut out, "rayo_disk_objects", "gauge", "Objetos en disco en la última medición.", s.disk_objects);
+        single(&mut out, "rayo_disk_used_bytes", "gauge", "Bytes de objetos y metadatos de la caché.", s.disk_used_bytes);
+        single(&mut out, "rayo_disk_objects", "gauge", "Objetos de la caché en disco.", s.disk_objects);
+        single(&mut out, "rayo_disk_limit_bytes", "gauge", "Límite de la caché en disco (0 = sin límite).", s.disk_limit_bytes);
+        single(&mut out, "rayo_disk_free_bytes", "gauge", "Espacio libre del volumen de la caché.", s.disk_free_bytes);
+        single(&mut out, "rayo_disk_total_bytes", "gauge", "Tamaño del volumen de la caché.", s.disk_total_bytes);
+        single(&mut out, "rayo_evicted_entries_total", "counter", "Entradas expulsadas por el límite de disco.", s.evicted_entries);
+        single(&mut out, "rayo_evicted_bytes_total", "counter", "Bytes liberados por el límite de disco.", s.evicted_bytes);
 
         help_and_type(&mut out, "rayo_request_duration_seconds", "histogram", "Tiempo hasta tener lista la respuesta, por resultado.");
         self.latency.hit.write_prometheus(&mut out, "hit");
@@ -381,10 +524,38 @@ mod tests {
     #[test]
     fn las_estadisticas_publicas_no_crecen() {
         let json = serde_json::to_value(Stats::default().snapshot()).unwrap();
-        for private in ["uptime_secs", "request_hit_ratio", "corrupt_objects", "store_write_errors", "disk_used_bytes", "disk_objects"] {
+        for private in ["uptime_secs", "request_hit_ratio", "corrupt_objects", "store_write_errors", "disk_used_bytes", "disk_objects", "disk_limit_bytes", "disk_free_bytes", "evicted_entries", "since"] {
             assert!(json.get(private).is_none(), "{private} no debe salir en rayo.stats");
         }
         assert!(json.get("requests").is_some());
+    }
+
+    #[test]
+    fn guarda_y_recupera_los_contadores_pero_no_las_medidas_del_disco() {
+        let s = Stats::default();
+        Stats::add(&s.hits, 3);
+        Stats::add(&s.evicted_bytes, 9);
+        s.disk_used_bytes.store(5, Relaxed);
+        let text = s.saved_json();
+
+        let back = Stats::default();
+        back.restore(&text).unwrap();
+        assert_eq!(back.hits.load(Relaxed), 3);
+        assert_eq!(back.evicted_bytes.load(Relaxed), 9);
+        assert_eq!(back.disk_used_bytes.load(Relaxed), 0);
+
+        back.restore(r#"{"hits": 8, "contador_futuro": 1}"#).unwrap();
+        assert_eq!(back.hits.load(Relaxed), 8);
+        assert!(back.restore("{dañado").is_err());
+        assert_eq!(back.hits.load(Relaxed), 8);
+    }
+
+    #[test]
+    fn el_panel_no_incluye_datos_por_cliente() {
+        let json = Stats::default().panel_json().to_string();
+        assert!(!json.contains("client\":{"));
+        assert!(json.contains("\"disk\""));
+        assert!(json.contains("\"latency\""));
     }
 
     #[test]

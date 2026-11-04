@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Prueba de punta a punta: origen de laboratorio (HTTP :8080 / HTTPS :8443) + varios proxies en :3129-3137 y :3139.
+# Prueba de punta a punta: origen de laboratorio (HTTP :8080 / HTTPS :8443) + varios proxies en :3129-3137, :3139 y :3146-3149.
 # Requiere: openssl, python3 y curl. No hace falta tocar el archivo hosts: usa localhost (se intercepta)
 # y 127.0.0.1 (no se intercepta). Sale con código 1 si alguna verificación falla.
 #
@@ -23,7 +23,7 @@ printf "subjectAltName=DNS:localhost,IP:127.0.0.1\nbasicConstraints=CA:FALSE\nex
 openssl x509 -req -in origin.csr -CA origin-ca.pem -CAkey origin-ca.key -CAcreateserial -out origin.pem -days 2 -extfile ext.cnf 2>/dev/null
 
 # Escribe config.<nombre>.toml. Se puede ajustar con LISTEN, CLIENTS, RATE, INTERNAL, BUDGET, DOMAINS, CONTACT,
-# ADMIN, ADMIN_TOKEN, LOG_ENABLED, LOG_DAYS y LOG_IP.
+# ADMIN, ADMIN_TOKEN, LOG_ENABLED, LOG_DAYS, LOG_IP, MAX_DISK, ALERT_DISK_FREE, ALERT_CA_DAYS y CLIENT_STATS.
 write_config() {
   local listen="${LISTEN:-127.0.0.1:$2}" clients="${CLIENTS:-[\"127.0.0.1/32\", \"::1/128\"]}"
   local internal="${INTERNAL:-[\"127.0.0.0/8\", \"::1/128\"]}" domains="${DOMAINS:-[\"localhost\"]}"
@@ -51,7 +51,11 @@ stats_host = "rayo.stats"
 upstream_extra_ca = ["./origin-ca.pem"]
 admin_listen = "${ADMIN:-}"
 admin_token_file = "${ADMIN_TOKEN:-./ca/admin.token}"
-disk_scan_interval_secs = 1
+max_disk_bytes = ${MAX_DISK:-0}
+maintenance_interval_secs = 1
+alert_disk_free_percent = ${ALERT_DISK_FREE:-0}
+alert_ca_days = ${ALERT_CA_DAYS:-30}
+client_stats_enabled = ${CLIENT_STATS:-false}
 access_log_enabled = ${LOG_ENABLED:-false}
 access_log_dir = "./logs-$1"
 access_log_retention_days = ${LOG_DAYS:-7}
@@ -61,17 +65,20 @@ EOF
 
 PIDS=()
 trap 'kill "${PIDS[@]}" 2>/dev/null' EXIT
-start_proxy() {
-  write_config "$1" "$2"
-  "$BIN" "config.$1.toml" > "$1.log" 2>&1 &
+launch_proxy() {
+  "$BIN" "config.$1.toml" >> "$1.log" 2>&1 &
   PIDS+=($!)
   for _ in $(seq 1 50); do
     curl -s --noproxy "" -x "http://127.0.0.1:$2" http://rayo.stats/ >/dev/null && return
     sleep 0.2
   done
 }
+start_proxy() {
+  write_config "$1" "$2"
+  launch_proxy "$1" "$2"
+}
 
-rm -rf ca data-* logs-*
+rm -rf ca data-* logs-* ./*.log
 # Un log que ya venció y un archivo ajeno, para comprobar que la retención borra solo lo que debe.
 mkdir -p logs-observed
 echo '{}' > logs-observed/access-2020-01-01.jsonl
@@ -86,6 +93,9 @@ RUST_LOG=rayo_cache=debug CONTACT='<script>alert(1)</script>' start_proxy detail
 RUST_LOG=info start_proxy verbose 3135
 ADMIN=127.0.0.1:3137 LOG_ENABLED=true start_proxy observed 3136
 LOG_ENABLED=true LOG_IP=none LOG_DAYS=3 start_proxy anon 3139
+ADMIN=127.0.0.1:3147 MAX_DISK=220000 start_proxy capped 3146
+CAPPED_PID=${PIDS[-1]}
+ADMIN=127.0.0.1:3149 ALERT_CA_DAYS=5000 ALERT_DISK_FREE=100 CLIENT_STATS=true start_proxy alerting 3148
 
 FAILS=0
 expect() { # descripción, esperado, obtenido
@@ -313,7 +323,7 @@ expect "sin token, /healthz responde"        "200" "$(admin_status $ADMIN_URL/he
 expect "sin token, /metrics se rechaza"      "401" "$(admin_status $ADMIN_URL/metrics)"
 expect "con un token incorrecto, también"    "401" "$(admin_status -H 'Authorization: Bearer incorrecto' $ADMIN_URL/metrics)"
 expect "con el token, responde"              "200" "$(admin_status -H "Authorization: Bearer $TOKEN" $ADMIN_URL/metrics)"
-expect "otras rutas no existen"              "404" "$(admin_status -H "Authorization: Bearer $TOKEN" $ADMIN_URL/)"
+expect "otras rutas no existen"              "404" "$(admin_status -H "Authorization: Bearer $TOKEN" $ADMIN_URL/otra)"
 expect "a través del proxy, el token se sigue exigiendo" "401 -" "$(px $ADMIN_URL/metrics)"
 PX=http://127.0.0.1:3132
 expect "con los destinos internos bloqueados, ni se llega" "403 -" "$(px $ADMIN_URL/metrics)"
@@ -344,7 +354,6 @@ expect "acumula el tiempo"                   "si" "$(over "$(prom 'rayo_request_
 expect "ratio de peticiones"                 "si" "$(over "$(prom rayo_request_hit_ratio)" 0)"
 expect "los túneles quedan contados"         "2" "$(prom 'rayo_tls_connections_total{mode="passthrough"}')"
 expect "el formato es el de Prometheus"      "0" "$(curl -s --noproxy "*" -H "Authorization: Bearer $TOKEN" "$ADMIN_URL/metrics" | tr -d '\r' | grep -cvE '^(# (HELP|TYPE) rayo_|rayo_[a-z_]+(\{[a-z]+="[^"]*"(,[a-z]+="[^"]*")*\})? [0-9.e+-]+$)')"
-sleep 1.5
 expect "mide el disco"                       "si" "$(over "$(prom rayo_disk_used_bytes)" 0)"
 expect "cuenta los objetos"                  "si" "$(over "$(prom rayo_disk_objects)" 0)"
 
@@ -391,6 +400,7 @@ expect "ni credenciales"                     "0" "$(log_text | grep -c 'SECRETO-
 expect "ni cuerpos"                          "0" "$(log_text | grep -c 'SECRETO-CUERPO')"
 expect "ni la IP del cliente"                "0" "$(log_count observed 'l["client"]=="127.0.0.1"')"
 expect "el registro del proxy tampoco tiene parámetros" "0" "$(grep -c 'SECRETO' observed.log)"
+expect "ni los metadatos guardados en disco" "0" "$(grep -rl 'SECRETO' data-observed/meta | wc -l | tr -d ' ')"
 if command -v icacls >/dev/null; then
   expect "solo un usuario puede leer el log" "1" "$(icacls "$LOG_FILE" | grep -c ':(')"
 else
@@ -422,6 +432,122 @@ printf 'corto' > debil.token
 ADMIN=127.0.0.1:3145 ADMIN_TOKEN=./debil.token write_config token-debil 3145
 expect "token demasiado corto"               "1" "$(startup_exit token-debil)"
 rm -f debil.token
+
+section "19. Límite de disco"
+PX=http://127.0.0.1:3146
+ADMIN_URL=http://127.0.0.1:3147
+not_over() { if python3 -c "import sys; sys.exit(0 if float(sys.argv[1]) <= float(sys.argv[2]) else 1)" "$1" "$2"; then echo si; else echo no; fi; }
+blob() { px "http://localhost:8080/blob/$1"; }
+# El índice ordena por segundos: las pausas hacen que el orden de uso no dependa del azar.
+expect "objeto 1"                            "200 MISS" "$(blob 1)"
+expect "objeto 2"                            "200 MISS" "$(blob 2)"
+sleep 1.1
+expect "objeto 3"                            "200 MISS" "$(blob 3)"
+sleep 1.1
+expect "volver a usar el objeto 1"           "200 HIT"  "$(blob 1)"
+sleep 1.1
+expect "objeto 4"                            "200 MISS" "$(blob 4)"
+expect "objeto 5, que pasa del límite"       "200 MISS" "$(blob 5)"
+sleep 0.5
+expect "objeto 6"                            "200 MISS" "$(blob 6)"
+sleep 0.5
+expect "la caché no pasa de su límite"       "si" "$(not_over "$(prom rayo_disk_used_bytes)" 220000)"
+expect "cuenta lo expulsado"                 "si" "$(over "$(prom rayo_evicted_entries_total)" 0)"
+expect "los archivos coinciden con la cuenta" "$(prom rayo_disk_objects)" "$(find data-capped/objects -type f | wc -l | tr -d ' ')"
+expect "lo usado hace poco se conserva"      "200 HIT"  "$(blob 1)"
+expect "lo más antiguo salió"                "200 MISS" "$(blob 2)"
+expect "no es un fallo: no se activa ninguna alerta" "0" "$(prom 'rayo_alert{name="disk_limit"}')"
+
+PX=http://127.0.0.1:3129
+first=$(curl -s --noproxy "*" "$ORIGIN_HTTP/mutable" | sha)
+first_path="data-e2e/objects/${first:0:2}/$first"
+expect "contenido que puede cambiar"         "200 MISS" "$(px http://localhost:8080/mutable)"
+expect "queda en disco"                      "si" "$([ -e "$first_path" ] && echo si || echo no)"
+curl -s --noproxy "*" -o /dev/null "$ORIGIN_HTTP/mutable-change"
+expect "al cambiar se guarda lo nuevo"       "200 MISS" "$(px http://localhost:8080/mutable)"
+expect "y se borra lo que ya nadie usa"      "no" "$([ -e "$first_path" ] && echo si || echo no)"
+h=$(curl -s --noproxy "*" "$ORIGIN_HTTP/mutable" | sha)
+expect "lo nuevo sí está"                    "si" "$([ -e "data-e2e/objects/${h:0:2}/$h" ] && echo si || echo no)"
+
+section "20. Reinicio"
+PX=http://127.0.0.1:3146
+sleep 1.5
+req_before=$(metric requests); used_before=$(prom rayo_disk_used_bytes); objects_before=$(prom rayo_disk_objects)
+kill "$CAPPED_PID"
+sleep 1
+expect "los contadores quedaron en disco"    "si" "$(python3 -c 'import json,sys; print("si" if json.load(open(sys.argv[1]))["requests"]>0 else "no")' data-capped/stats.json)"
+mkdir -p data-capped/objects/cc data-capped/objects/ff data-capped/meta/dd
+orphan="data-capped/objects/cc/$(printf 'c%.0s' $(seq 1 64))"
+temp="data-capped/objects/ff/$(printf 'f%.0s' $(seq 1 64)).tmp4242"
+broken="data-capped/meta/dd/$(printf 'd%.0s' $(seq 1 64)).json"
+echo huerfano > "$orphan"; echo temporal > "$temp"; echo '{roto' > "$broken"; echo mio > data-capped/objects/cc/notas.txt
+launch_proxy capped 3146
+expect "los contadores siguen sumando"       "$req_before" "$(metric requests)"
+expect "la cuenta del disco es la misma"     "$used_before" "$(prom rayo_disk_used_bytes)"
+expect "y la de los objetos"                 "$objects_before" "$(prom rayo_disk_objects)"
+expect "lo guardado sigue sirviéndose"       "200 HIT" "$(blob 1)"
+expect "borra los objetos sin dueño"         "no" "$([ -e "$orphan" ] && echo si || echo no)"
+expect "los temporales de un corte"          "no" "$([ -e "$temp" ] && echo si || echo no)"
+expect "y los metadatos dañados"             "no" "$([ -e "$broken" ] && echo si || echo no)"
+expect "pero no los archivos ajenos"         "si" "$([ -e data-capped/objects/cc/notas.txt ] && echo si || echo no)"
+expect "los histogramas empiezan de cero"    "1" "$(prom 'rayo_request_duration_seconds_count{result="hit"}')"
+expect "las estadísticas públicas no cambian" "ausente" "$(metric evicted_entries)"
+
+section "21. Alertas"
+# Espera hasta $3 segundos a que una serie de /metrics tenga el valor $2, y dice cuál tiene al final.
+wait_prom() {
+  local i
+  for ((i = 0; i < $3 * 4; i++)); do
+    [ "$(prom "$1")" = "$2" ] && break
+    sleep 0.25
+  done
+  prom "$1"
+}
+ADMIN_URL=http://127.0.0.1:3149
+expect "avisa si la CA está por vencer"      "1" "$(wait_prom 'rayo_alert{name="ca_expiry"}' 1 4)"
+expect "o si queda poco espacio"             "1" "$(wait_prom 'rayo_alert{name="disk_space"}' 1 4)"
+expect "deja constancia en el registro"      "si" "$(has "$(sed 's/\x1b\[[0-9;]*m//g' alerting.log)" 'alerta="ca_expiry"')"
+ADMIN_URL=http://127.0.0.1:3137
+PX=http://127.0.0.1:3136
+expect "sin problemas no se activa"          "0" "$(prom 'rayo_alert{name="ca_expiry"}')"
+parallel 12 "http://localhost:1/x" >/dev/null
+expect "muchos errores del origen la activan" "1" "$(wait_prom 'rayo_alert{name="origin_errors"}' 1 8)"
+expect "y se apaga sola al pasar"            "0" "$(wait_prom 'rayo_alert{name="origin_errors"}' 0 15)"
+h=$(curl -s --noproxy "*" "$ORIGIN_HTTP/static.js" | sha)
+printf 'alterado' > "data-observed/objects/${h:0:2}/$h"
+px "$L/static.js?token=SECRETO-QUERY" >/dev/null
+expect "un objeto corrupto la activa"        "1" "$(wait_prom 'rayo_alert{name="corrupt_objects"}' 1 4)"
+
+section "22. Panel y detalle por cliente"
+api() { curl -s --noproxy "*" -H "Authorization: Bearer $TOKEN" "$1"; }
+field() { python3 -c 'import json,sys; v=json.load(sys.stdin); print(eval(sys.argv[1]))' "$1"; }
+page_headers=$(curl -s --noproxy "*" -o panel.html -D - $ADMIN_URL/ | tr -d '\r')
+expect "sin token se sirve la página"        "si" "$(has "$page_headers" 'HTTP/1.1 200')"
+expect "que no admite recursos externos"     "si" "$(has "$page_headers" "default-src 'none'")"
+expect "ni scripts en línea"                 "no" "$(has "$page_headers" 'unsafe-inline')"
+expect "y no contiene datos"                 "0" "$(grep -c "$(metric requests)" panel.html)"
+rm -f panel.html
+expect "su código está disponible"           "200" "$(admin_status $ADMIN_URL/panel.js)"
+expect "y su estilo"                         "200" "$(admin_status $ADMIN_URL/panel.css)"
+expect "los datos exigen el token"           "401" "$(admin_status $ADMIN_URL/api/summary)"
+expect "también por cliente"                 "401" "$(admin_status $ADMIN_URL/api/clients)"
+expect "con el token responde"               "$(metric requests)" "$(api $ADMIN_URL/api/summary | field 'v["requests"]')"
+expect "e incluye las alertas"               "True" "$(api $ADMIN_URL/api/summary | field '"corrupt_objects" in [a["name"] for a in v["alerts"]]')"
+expect "apagado no guarda nada por cliente"  "False []" "$(api $ADMIN_URL/api/clients | field 'str(v["enabled"]) + " " + str(v["clients"])')"
+page=$(body http://rayo.aviso/)
+expect "y el aviso lo dice"                  "si" "$(has "$page" 'Totales por dispositivo: desactivados')"
+PX=http://127.0.0.1:3148
+ADMIN_URL=http://127.0.0.1:3149
+px http://localhost:8080/copia.js >/dev/null
+px http://localhost:8080/copia.js >/dev/null
+expect "activado, cuenta las peticiones"     "2" "$(api $ADMIN_URL/api/clients | field 'v["clients"][0]["requests"]')"
+expect "y cuántas salieron de una copia"     "1" "$(api $ADMIN_URL/api/clients | field 'v["clients"][0]["served_from_copy"]')"
+expect "con la IP"                           "127.0.0.1" "$(api $ADMIN_URL/api/clients | field 'v["clients"][0]["ip"]')"
+expect "pero no qué sitios"                  "no" "$(has "$(api $ADMIN_URL/api/clients)" 'localhost')"
+sleep 1.5
+expect "y no se guarda en disco"             "0" "$(grep -c '127.0.0.1' data-alerting/stats.json)"
+page=$(body http://rayo.aviso/)
+expect "el aviso indica que está activo"     "si" "$(has "$page" 'Totales por dispositivo: activados')"
 
 echo
 if [ "$FAILS" -eq 0 ]; then

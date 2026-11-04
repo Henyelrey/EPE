@@ -44,6 +44,8 @@ Reglas de seguridad incluidas:
 - La CA solo puede firmar para los dominios configurados al generarla, y su llave solo la puede leer el usuario que ejecuta el proxy.
 - Si un objeto no cabe en `max_buffered_bytes`, se atiende en streaming, sin caché.
 - Si varios clientes piden a la vez un objeto que no está, solo uno va al origen y los demás esperan hasta `coalesce_wait_secs`.
+- La caché no pasa de `max_disk_bytes`: se borran las entradas usadas hace más tiempo, y un objeto solo cuando ninguna URL lo usa.
+- En el registro y en los metadatos del disco, las URLs se guardan sin parámetros, porque pueden contener tokens.
 
 ## Compilar
 
@@ -94,18 +96,46 @@ Un cliente permitido todavía puede abrir túneles a cualquier puerto de una IP 
 - `denied_clients`, `rate_limited` y `blocked_destinations` cuentan rechazos. Un rechazo no suma en `requests`, salvo un nombre que resuelve a una IP interna, que además cuenta como `origin_errors`.
 - `over_budget` cuenta las veces que no hubo memoria disponible y `coalesced` las peticiones que esperaron a otra igual.
 
-Todos los contadores vuelven a cero al reiniciar el proxy.
+Los contadores se guardan en `data_dir/stats.json` cada `maintenance_interval_secs` y al cerrar el proxy con Ctrl+C. Si el proceso se cae, se pierde lo ocurrido desde la última vez. Por eso, tras una caída la suma de arriba puede no cuadrar por unas pocas peticiones. Para empezar de cero, borra ese archivo con el proxy apagado. Los tiempos de respuesta no se guardan.
 
-### Métricas para Prometheus
+### Límite de disco
+
+La caché ocupa como máximo `max_disk_bytes` (por defecto 10 GiB; `0` = sin límite). Al pasarse, libera hasta quedar en el 90 %, empezando por lo usado hace más tiempo. Con el límite lleno, esto es lo normal y no genera ninguna alerta.
+
+- Cuenta el tamaño de los archivos, no lo que ocupan según el sistema de archivos, así que el espacio real puede ser algo mayor.
+- Al arrancar revisa la carpeta: borra objetos sin metadatos, metadatos ilegibles o sin objeto, y temporales de un corte. No toca archivos con otros nombres. **No uses la misma `data_dir` en dos procesos.**
+- Tras un reinicio, el orden de uso se aproxima con la fecha de los archivos.
+- Si bajas el límite o actualizas desde una versión sin límite con una caché más grande, lo que sobre se borra al arrancar.
+
+### Panel
 
 El proxy abre un puerto de administración en `admin_listen` (por defecto `127.0.0.1:9128`; vacío lo desactiva). Si no puede abrirlo, no arranca.
+
+Abre `http://127.0.0.1:9128/` y pega el token. El panel muestra la descarga evitada, los ratios, el reparto de peticiones, el disco y las alertas, y se actualiza cada 5 segundos.
+
+Sin token, la página se sirve vacía: **todos los datos lo exigen**. El token se crea al arrancar en `admin_token_file` (`ca/admin.token`), con acceso solo para el usuario que ejecuta el proxy. Para cambiarlo, bórralo y reinicia. El panel lo guarda solo en esa pestaña y lo olvida al pulsar «Salir». Si escuchas fuera de `127.0.0.1`, el token viaja sin cifrar por esa red: el proxy lo advierte al arrancar.
+
+**Por cliente.** Con `client_stats_enabled = true`, el panel lista cada IP con sus peticiones, bytes, túneles y rechazos, pero no qué sitios visitó. Viene apagado porque son datos sobre personas, y el aviso de `http://rayo.aviso/` indica si está activo. Solo vive en memoria y se olvida tras un día sin actividad o al reiniciar. Guarda hasta 4096 clientes: los que no quepan no se cuentan hasta que se olvide alguno.
+
+### Alertas
+
+Se evalúan cada `maintenance_interval_secs` (por defecto 60). Se ven en el panel y como `rayo_alert{name="..."}` en `/metrics`, y dejan una línea en el registro al activarse y al apagarse. El proxy no envía avisos por su cuenta: para recibirlos, configura una regla en Prometheus.
+
+| `name` | Se activa cuando |
+|---|---|
+| `disk_space` | El volumen de la caché tiene menos de `alert_disk_free_percent` libre (10 %). |
+| `disk_limit` | La caché pasa de su límite en más de un 10 %: no se están pudiendo borrar copias. |
+| `ca_expiry` | A la CA le quedan `alert_ca_days` días o menos (30), o ya venció. |
+| `origin_errors` | En las últimas 5 pasadas, al menos `alert_origin_error_percent` (20 %) de las peticiones no pudo contactar al origen, con un mínimo de 10 peticiones. |
+| `corrupt_objects` | Se descartó algún objeto corrupto en las últimas 5 pasadas. |
+| `store_writes` | Alguna respuesta no se pudo guardar en las últimas 5 pasadas. |
+
+### Métricas para Prometheus
 
 ```bash
 curl http://127.0.0.1:9128/healthz                                        # sin token: solo dice si está vivo
 curl -H "Authorization: Bearer $(cat ca/admin.token)" http://127.0.0.1:9128/metrics
 ```
-
-El token se crea al arrancar en `admin_token_file` (`ca/admin.token`), con acceso solo para el usuario que ejecuta el proxy. Para cambiarlo, bórralo y reinicia. Si escuchas fuera de `127.0.0.1`, el token viaja sin cifrar por esa red: el proxy lo advierte al arrancar.
 
 ```yaml
 # prometheus.yml
@@ -122,9 +152,12 @@ Además de los contadores de arriba, `/metrics` incluye lo que no se publica en 
 | Métrica | Qué mide |
 |---|---|
 | `rayo_request_hit_ratio`, `rayo_byte_hit_ratio` | Parte de las peticiones y de los bytes servidos desde una copia. |
-| `rayo_request_duration_seconds{result}` | Histograma del tiempo hasta tener lista la respuesta. En `hit`, `miss` y `revalidated` incluye leer o descargar el cuerpo, pero no enviarlo al cliente. En `bypass` termina al empezar a reenviar, así que no mide la descarga. |
+| `rayo_request_duration_seconds{result}` | Histograma del tiempo hasta tener lista la respuesta, desde el último arranque. En `hit`, `miss` y `revalidated` incluye leer o descargar el cuerpo, pero no enviarlo al cliente. En `bypass` termina al empezar a reenviar, así que no mide la descarga. |
 | `rayo_corrupt_objects_total`, `rayo_store_write_errors_total` | Objetos descartados por no coincidir con su hash y respuestas que no se pudieron guardar. |
-| `rayo_disk_used_bytes`, `rayo_disk_objects` | Última medición del disco, cada `disk_scan_interval_secs`. |
+| `rayo_disk_used_bytes`, `rayo_disk_limit_bytes`, `rayo_disk_objects` | Lo que ocupa la caché, su límite y cuántos objetos tiene. |
+| `rayo_disk_free_bytes`, `rayo_disk_total_bytes` | Espacio del volumen, medido cada `maintenance_interval_secs`. |
+| `rayo_evicted_entries_total`, `rayo_evicted_bytes_total` | Lo expulsado por el límite de disco. |
+| `rayo_alert{name}`, `rayo_ca_not_after_seconds` | Si cada alerta está activa, y cuándo vence la CA. |
 | `rayo_access_log_dropped_total`, `rayo_access_log_errors_total` | Líneas perdidas del log de acceso y errores al escribirlo. |
 | `rayo_uptime_seconds` | Tiempo desde el arranque. |
 
@@ -164,7 +197,7 @@ cargo build --release
 ./e2e/run.sh                     # origen de laboratorio + proxy; termina con error si algo falla
 ```
 
-El e2e requiere bash, `openssl`, `python3` y `curl`, y usa los puertos 3129-3137, 3139, 8080 y 8443. En Windows se ejecuta desde Git Bash.
+El e2e requiere bash, `openssl`, `python3` y `curl`, y usa los puertos 3129-3137, 3139, 3146-3149, 8080 y 8443. En Windows se ejecuta desde Git Bash.
 
 El e2e verifica, entre otras cosas, que 20 peticiones simultáneas a un objeto nuevo causan 1 sola descarga al origen. No prueba clientes en otras máquinas ni navegadores: conviene probar la CA limitada en los navegadores de tu red antes de repartirla.
 
@@ -178,8 +211,6 @@ fallarán si se interceptan: van en `never_intercept`.
 ## Mejoras siguientes (en orden de impacto)
 
 1. **Soporte de `Range`** para segmentos de video y descargas reanudables (servir rebanadas del objeto completo).
-2. **Recolector de disco LRU** con un tope `max_disk_bytes` (hoy el disco crece sin límite).
-3. **Modo transparente**: `iptables -t nat ... REDIRECT` hacia el proxy; el filtro por SNI ya está implementado. Bloquear UDP/443 para que el tráfico no se escape por QUIC.
-4. **Prefetch nocturno predictivo** a partir de los logs (qué se repite y cuándo).
-5. **Panel de ahorro** en HTML.
-6. **Modo cooperativo**: manifiestos firmados por sitios aliados para cachear contenido semidinámico sin CA local.
+2. **Modo transparente**: `iptables -t nat ... REDIRECT` hacia el proxy; el filtro por SNI ya está implementado. Bloquear UDP/443 para que el tráfico no se escape por QUIC.
+3. **Prefetch nocturno predictivo** a partir de los logs (qué se repite y cuándo).
+4. **Modo cooperativo**: manifiestos firmados por sitios aliados para cachear contenido semidinámico sin CA local.

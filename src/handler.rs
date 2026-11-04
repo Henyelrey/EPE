@@ -2,6 +2,7 @@
 
 use crate::access::{literal_ip, ClientDecision, ClientGate, DestinationPolicy, ResolveError};
 use crate::access_log::{AccessLog, Record};
+use crate::clients::ClientStats;
 use crate::coalesce::{Entry, FlightGuard, Flights};
 use crate::config::Config;
 use crate::memory::{MemoryBudget, Reservation};
@@ -29,6 +30,7 @@ pub struct Shared {
     pub memory: MemoryBudget,
     pub flights: Flights,
     pub access_log: AccessLog,
+    pub client_stats: Arc<ClientStats>,
     /// Página de http://rayo.aviso/, generada al arrancar.
     pub notice: Bytes,
 }
@@ -58,6 +60,7 @@ impl RequestInfo {
     }
 
     fn log(&self, sh: &Shared, outcome: Outcome, status: Option<u16>, bytes: Option<u64>, elapsed: Duration) {
+        sh.client_stats.record(self.client, outcome, bytes);
         sh.access_log.record(Record {
             client: self.client,
             method: self.method.as_str(),
@@ -83,8 +86,8 @@ impl RequestInfo {
 /// Lo que se recuerda entre `handle_request` y `handle_response` del mismo intercambio.
 struct Pending {
     info: Arc<RequestInfo>,
+    /// Sin parámetros: se usa en el registro y en los metadatos que se guardan en disco.
     url: String,
-    key: String,
     key_hash: String,
     /// Copia vencida que se está revalidando con If-None-Match / If-Modified-Since,
     /// con su memoria ya reservada para poder servirla si el origen responde 304.
@@ -159,7 +162,7 @@ fn empty_response(status: StatusCode) -> Response<Body> {
     Response::builder().status(status).body(Body::empty()).expect("respuesta estática válida")
 }
 
-/// La URL para el registro: los valores de los parámetros pueden ser tokens o datos personales.
+/// La URL para el registro y el disco: los valores de los parámetros pueden ser tokens o datos personales.
 fn without_query(url: &str) -> &str {
     url.split('?').next().unwrap_or(url)
 }
@@ -269,6 +272,7 @@ impl HttpHandler for CacheHandler {
         let s = &self.shared.stats;
         Stats::inc(if yes { &s.tls_intercepted } else { &s.tls_passthrough });
         if !yes {
+            self.shared.client_stats.record(ctx.client_addr.ip(), Outcome::Tunnel, None);
             self.shared.access_log.record(Record {
                 client: ctx.client_addr.ip(),
                 method: Method::CONNECT.as_str(),
@@ -301,6 +305,7 @@ impl HttpHandler for CacheHandler {
             }
             ClientDecision::RateLimited => {
                 Stats::inc(&sh.stats.rate_limited);
+                sh.client_stats.record_rate_limited(client);
                 tracing::debug!(%client, "límite de peticiones superado");
                 let mut res = empty_response(StatusCode::TOO_MANY_REQUESTS);
                 res.headers_mut().insert(header::RETRY_AFTER, HeaderValue::from_static("60"));
@@ -355,8 +360,8 @@ impl HttpHandler for CacheHandler {
         }
 
         let normalized = sh.normalizer.normalize(&url);
-        let key = format!("{normalized}|{}", policy::encoding_bucket(req.headers()));
-        let key_hash = Store::key_hash(&key);
+        let key_hash = Store::key_hash(&format!("{normalized}|{}", policy::encoding_bucket(req.headers())));
+        let log_url = without_query(&normalized).to_owned();
         let client_conditional =
             req.headers().contains_key(header::IF_NONE_MATCH) || req.headers().contains_key(header::IF_MODIFIED_SINCE);
 
@@ -388,7 +393,7 @@ impl HttpHandler for CacheHandler {
                     if let Some(res) = self.serve_from_cache(&meta, "HIT", reservation).await {
                         Stats::inc(&sh.stats.hits);
                         info.finish(&sh, Outcome::Hit, Some(200), Some(meta.size));
-                        tracing::info!(url = %without_query(&normalized), "HIT");
+                        tracing::info!(url = %log_url, "HIT");
                         return res.into();
                     }
                 // Vencido: se pide al origen solo si cambió (ahorra el cuerpo completo si responde 304).
@@ -406,7 +411,7 @@ impl HttpHandler for CacheHandler {
             }
         }
 
-        self.exchange = Exchange::Candidate(Arc::new(Pending { info, url: normalized, key, key_hash, stale, _flight: flight }));
+        self.exchange = Exchange::Candidate(Arc::new(Pending { info, url: log_url, key_hash, stale, _flight: flight }));
         req.into()
     }
 
@@ -421,7 +426,7 @@ impl HttpHandler for CacheHandler {
             }
             Exchange::Candidate(p) => p,
         };
-        let log_url = without_query(&p.url);
+        let log_url = &p.url;
 
         // 1) Revalidación exitosa: el origen confirma que nuestra copia sigue válida.
         if status == StatusCode::NOT_MODIFIED {
@@ -511,7 +516,6 @@ impl HttpHandler for CacheHandler {
         let ttl = policy::ttl_secs(h, sh.cfg.default_ttl_secs);
         let meta = Meta {
             url: p.url.clone(),
-            key: p.key.clone(),
             object: String::new(),
             size: 0,
             headers: h

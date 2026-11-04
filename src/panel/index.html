@@ -1,0 +1,90 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Panel de rayo-cache</title>
+<link rel="stylesheet" href="/panel.css">
+<script src="/panel.js" defer></script>
+</head>
+<body>
+<header class="top">
+  <h1>rayo-cache</h1>
+  <p id="freshness" class="muted" aria-live="polite"></p>
+  <button id="logout" type="button" class="ghost" hidden>Salir</button>
+</header>
+
+<form id="login" class="card login" hidden>
+  <h2>Token de administración</h2>
+  <p class="muted">Está en el archivo <code>admin_token_file</code> de la configuración, por defecto <code>ca/admin.token</code>. Solo se guarda en esta pestaña.</p>
+  <label for="token">Token</label>
+  <input id="token" type="password" autocomplete="off" spellcheck="false" required>
+  <p id="login-error" class="error" role="alert" hidden></p>
+  <button type="submit">Entrar</button>
+</form>
+
+<main id="dashboard" hidden>
+  <section id="alerts" aria-label="Alertas"></section>
+
+  <section class="card hero">
+    <p class="label">Descarga evitada gracias a las copias</p>
+    <p id="saved" class="hero-value"></p>
+    <p id="saved-note" class="muted"></p>
+  </section>
+
+  <section class="tiles" aria-label="Resumen">
+    <div class="card tile"><p class="label">Bytes servidos desde copia</p><p id="byte-ratio" class="value"></p></div>
+    <div class="card tile"><p class="label">Peticiones servidas desde copia</p><p id="request-ratio" class="value"></p></div>
+    <div class="card tile"><p class="label">Peticiones</p><p id="requests" class="value"></p></div>
+    <div class="card tile"><p class="label">La CA vence</p><p id="ca-expiry" class="value"></p></div>
+  </section>
+
+  <section class="card">
+    <h2>Cómo se atendieron las peticiones</h2>
+    <p id="results-empty" class="muted" hidden>Todavía no hay peticiones.</p>
+    <div id="results-bar" class="segments" role="group" aria-label="Reparto de las peticiones por resultado"></div>
+    <ul id="results-legend" class="legend"></ul>
+    <div class="table-scroll">
+      <table>
+        <thead><tr><th scope="col">Resultado</th><th scope="col" class="num">Peticiones</th><th scope="col" class="num">Parte</th><th scope="col" class="num">Tiempo medio</th></tr></thead>
+        <tbody id="results-table"></tbody>
+      </table>
+    </div>
+    <p class="muted note">El tiempo medio es hasta tener lista la respuesta, desde el último arranque. En “Sin caché” no incluye la descarga.</p>
+  </section>
+
+  <div class="columns">
+    <section class="card">
+      <h2>Disco</h2>
+      <div class="meter-block">
+        <p class="meter-label"><span>Caché</span><span id="cache-usage"></span></p>
+        <div class="meter" id="cache-meter" role="img"><div class="fill"></div></div>
+      </div>
+      <div class="meter-block">
+        <p class="meter-label"><span>Volumen</span><span id="volume-usage"></span></p>
+        <div class="meter" id="volume-meter" role="img"><div class="fill"></div></div>
+      </div>
+      <dl id="disk-details"></dl>
+    </section>
+
+    <section class="card">
+      <h2>Tráfico y estado</h2>
+      <dl id="health"></dl>
+    </section>
+  </div>
+
+  <section class="card">
+    <h2>Por cliente</h2>
+    <p id="clients-off" class="muted" hidden>Desactivado. Se activa con <code>client_stats_enabled = true</code>, y el aviso a los usuarios lo indicará.</p>
+    <p id="clients-empty" class="muted" hidden>Todavía no hay actividad.</p>
+    <div id="clients-wrap" class="table-scroll" tabindex="0" role="region" aria-label="Detalle por cliente" hidden>
+      <table>
+        <thead><tr><th scope="col">IP</th><th scope="col" class="num">Peticiones</th><th scope="col" class="num">Desde copia</th><th scope="col" class="num">Bytes</th><th scope="col" class="num">Túneles</th><th scope="col" class="num">Rechazos</th><th scope="col">Última actividad</th></tr></thead>
+        <tbody id="clients-table"></tbody>
+      </table>
+    </div>
+  </section>
+</main>
+<div id="tooltip" class="tooltip" role="tooltip" hidden></div>
+</body>
+</html>

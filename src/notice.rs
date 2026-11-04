@@ -57,6 +57,17 @@ pub fn render(cfg: &Config, ca: &CaSummary, detailed_logs: bool) -> String {
     } else {
         "<li>Registro de acceso: desactivado. Quien administra el proxy puede activarlo; entonces anotaría los dominios visitados por cada dispositivo, y este aviso lo indicaría.</li>".to_owned()
     };
+    let client_stats = if cfg.client_stats_enabled {
+        "<li><strong>Totales por dispositivo: activados.</strong> Quien administra el proxy puede ver, junto a tu IP, cuántas peticiones y bytes usaste y cuándo fue la última vez, pero no qué sitios. \
+         Solo está en memoria y se olvida tras un día sin actividad o al reiniciar el proxy.</li>"
+    } else {
+        "<li>Totales por dispositivo: desactivados. Si se activaran, quien administra el proxy podría ver cuánto usa cada IP, y este aviso lo indicaría.</li>"
+    };
+    let retention = if cfg.max_disk_bytes > 0 {
+        "Cuando el disco llega al límite configurado, se borran las usadas hace más tiempo. Si no se llega, pueden permanecer hasta que quien administra el proxy las elimine."
+    } else {
+        "No se borran solas: permanecen hasta que quien administra el proxy las elimine."
+    };
     let rate_limit = if cfg.rate_limit_per_minute > 0 {
         format!(
             "<li>Se aceptan hasta {} peticiones por minuto de cada dispositivo. Para aplicar ese límite, tu IP se cuenta en memoria durante el minuto en curso; no se guarda en disco.</li>",
@@ -112,11 +123,12 @@ footer {{ margin-top: 3rem; color: var(--muted); font-size: .875rem; }}
 
 <h2>Qué se guarda</h2>
 <ul>
-<li><strong>Copias de contenido:</strong> la respuesta y su dirección, sin parámetros de seguimiento, en el disco del proxy. No indican quién las pidió. Por ahora no se borran solas: permanecen hasta que quien administra el proxy las elimine.</li>
+<li><strong>Copias de contenido:</strong> la respuesta y su dirección, sin parámetros, en el disco del proxy. No indican quién las pidió. {retention}</li>
 <li><strong>Nunca se guardan:</strong> cookies, credenciales, formularios enviados ni respuestas a peticiones que lleven cookies o credenciales.</li>
 <li><strong>Registro del proxy:</strong> la dirección de cada contenido servido desde la copia o guardado por primera vez, sin sus parámetros, y el destino de las conexiones que fallan, sin tu IP. El proxy no lo conserva por sí mismo en un archivo; si quien lo administra lo guarda, su conservación depende de esa persona.</li>
 {access_log}
-<li><strong>Contadores:</strong> totales generales, tiempos de respuesta y uso de disco, sin datos por persona.</li>
+{client_stats}
+<li><strong>Contadores:</strong> totales generales, tiempos de respuesta y uso de disco, sin datos por persona. Se conservan al reiniciar el proxy.</li>
 </ul>
 <p>{detailed}</p>
 <p>Quien administra este equipo puede acceder a todo lo anterior.</p>
@@ -146,7 +158,7 @@ mod tests {
     use super::*;
 
     fn ca(permitted: Option<Vec<String>>) -> CaSummary {
-        CaSummary { permitted, fingerprint: "AB:CD".into() }
+        CaSummary { permitted, fingerprint: "AB:CD".into(), not_after: 0 }
     }
 
     fn cfg() -> Config {
@@ -195,6 +207,19 @@ mod tests {
         let page = render(&anonymous, &ca(None), false);
         assert!(page.contains("No se anota nada que distinga a tu dispositivo"));
         assert!(!page.contains("qué dominios visitó un mismo dispositivo"));
+    }
+
+    #[test]
+    fn indica_los_totales_por_dispositivo_y_la_retencion_de_las_copias() {
+        let page = render(&cfg(), &ca(None), false);
+        assert!(page.contains("Totales por dispositivo: desactivados"));
+        assert!(page.contains("se borran las usadas hace más tiempo"));
+
+        let detailed = Config { client_stats_enabled: true, max_disk_bytes: 0, ..cfg() };
+        let page = render(&detailed, &ca(None), false);
+        assert!(page.contains("Totales por dispositivo: activados"));
+        assert!(page.contains("pero no qué sitios"));
+        assert!(page.contains("No se borran solas"));
     }
 
     #[test]

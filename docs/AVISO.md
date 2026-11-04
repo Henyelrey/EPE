@@ -44,17 +44,19 @@ Los sitios `http://` no usan cifrado, así que el proxy los ve siempre, tengas o
 
 | Dato | Incluye quién lo pidió | Cuánto dura |
 |---|---|---|
-| Copias de contenido y su dirección | No | Hasta que el responsable las borre |
+| Copias de contenido y su dirección, sin parámetros | No | Se borran las usadas hace más tiempo al llegar al límite del disco; si no se llega, hasta que el responsable las borre |
 | Registro de contenido servido o guardado, sin los parámetros de la dirección, y de los destinos de conexiones que fallan | No | [indica si se guarda y por cuánto tiempo] |
-| Contadores generales, tiempos de respuesta y uso de disco | No | Hasta reiniciar el proxy |
+| Contadores generales y uso de disco | No | Hasta que el responsable los borre |
+| Tiempos de respuesta | No | Hasta reiniciar el proxy |
 | Tu IP, para aplicar el límite de peticiones | Sí | Solo en memoria, durante el minuto en curso |
+| [Borra esta fila si no activas los totales por dispositivo] Tu IP junto a cuántas peticiones y bytes usaste y cuándo fue la última vez, pero no qué sitios | Sí | Solo en memoria: se olvida tras un día sin actividad o al reiniciar el proxy |
 | [Borra esta fila si no activas el registro de acceso] Registro de acceso: fecha y hora, método, dominio, resultado, tamaño y duración de cada petición y conexión cifrada | [Usa una: "Con un identificador que cambia cada día, calculado a partir de tu IP" o "No"] | [días configurados] días |
 
 **Nunca se guardan** cookies, credenciales, formularios enviados ni respuestas a peticiones que lleven cookies o credenciales. El registro de acceso tampoco incluye los parámetros de la dirección, y solo anota la ruta del contenido servido desde una copia o guardado.
 
 [Borra este párrafo si el registro de acceso no usa identificador] El identificador del registro de acceso no contiene tu IP, pero durante un día permite ver qué dominios visitó un mismo dispositivo. En una red pequeña podría deducirse de quién es.
 
-Si el responsable activa el registro detallado, el registro del proxy puede incluir además la IP de los dispositivos y los dominios a los que se conectan. La página del aviso muestra si el registro detallado y el registro de acceso están activos.
+Si el responsable activa el registro detallado, el registro del proxy puede incluir además la IP de los dispositivos y los dominios a los que se conectan. La página del aviso muestra si el registro detallado, el registro de acceso y los totales por dispositivo están activos.
 
 **Quién puede ver estos datos:** [personas o cargos]. Técnicamente, quien administra el equipo puede acceder a todos ellos.
 
