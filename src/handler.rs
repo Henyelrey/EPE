@@ -4,7 +4,8 @@ use crate::access::{literal_ip, ClientDecision, ClientGate, DestinationPolicy, R
 use crate::access_log::{AccessLog, Record};
 use crate::clients::ClientStats;
 use crate::coalesce::{Entry, FlightGuard, Flights};
-use crate::config::Config;
+use crate::config::{canonical_host, Config};
+use crate::detect::Detector;
 use crate::memory::{MemoryBudget, Reservation};
 use crate::policy::{self, AbsUrl, KeyNormalizer};
 use crate::stats::{Outcome, Stats};
@@ -13,6 +14,7 @@ use bytes::{Bytes, BytesMut};
 use http_body_util::BodyExt;
 use hudsucker::futures::{stream, StreamExt};
 use hudsucker::hyper::header::{self, HeaderValue};
+use hudsucker::hyper::http::uri::Authority;
 use hudsucker::hyper::{Method, Request, Response, StatusCode, Uri};
 use hudsucker::rustls::server::ClientHello;
 use hudsucker::{Body, HttpContext, HttpHandler, RequestOrResponse};
@@ -31,6 +33,7 @@ pub struct Shared {
     pub flights: Flights,
     pub access_log: AccessLog,
     pub client_stats: Arc<ClientStats>,
+    pub detector: Arc<Detector>,
     /// Página de http://rayo.aviso/, generada al arrancar.
     pub notice: Bytes,
 }
@@ -61,6 +64,7 @@ impl RequestInfo {
 
     fn log(&self, sh: &Shared, outcome: Outcome, status: Option<u16>, bytes: Option<u64>, elapsed: Duration) {
         sh.client_stats.record(self.client, outcome, bytes);
+        sh.detector.observe(self.client, status, bytes);
         sh.access_log.record(Record {
             client: self.client,
             method: self.method.as_str(),
@@ -112,6 +116,8 @@ enum Exchange {
 pub struct CacheHandler {
     shared: Arc<Shared>,
     exchange: Exchange,
+    /// Destino del CONNECT en curso, para compararlo con el SNI que llegue después.
+    connect_host: Option<String>,
 }
 
 /// Registra la petición cuando el cliente termina de recibir el cuerpo o se desconecta.
@@ -162,6 +168,13 @@ fn empty_response(status: StatusCode) -> Response<Body> {
     Response::builder().status(status).body(Body::empty()).expect("respuesta estática válida")
 }
 
+/// El Host no decide nada: el destino y la clave de caché salen de la URI, que en HTTPS es la del CONNECT.
+/// Que no coincidan no daña la caché, pero un navegador normal no lo hace.
+fn host_differs(host_header: &HeaderValue, uri_host: &str) -> bool {
+    let declared = host_header.to_str().ok().and_then(|text| text.parse::<Authority>().ok());
+    declared.is_none_or(|authority| canonical_host(authority.host()) != canonical_host(uri_host))
+}
+
 /// La URL para el registro y el disco: los valores de los parámetros pueden ser tokens o datos personales.
 fn without_query(url: &str) -> &str {
     url.split('?').next().unwrap_or(url)
@@ -169,7 +182,7 @@ fn without_query(url: &str) -> &str {
 
 impl CacheHandler {
     pub fn new(shared: Arc<Shared>) -> Self {
-        Self { shared, exchange: Exchange::Untracked }
+        Self { shared, exchange: Exchange::Untracked, connect_host: None }
     }
 
     async fn serve_from_cache<R: Send + Sync + 'static>(
@@ -222,7 +235,16 @@ impl CacheHandler {
         };
         let host = authority.host();
         let info = RequestInfo::new(client, started, &req, None, host);
-        let addrs = match sh.destinations.resolve(host, authority.port_u16().unwrap_or(443)).await {
+        // Antes de resolver el nombre: un puerto no permitido no debe generar tráfico alguno.
+        let port = authority.port_u16().unwrap_or(443);
+        if !sh.cfg.connect_port_allowed(port) {
+            Stats::inc(&sh.stats.blocked_ports);
+            tracing::debug!(host, port, "CONNECT a un puerto no permitido");
+            sh.detector.rare_port(client, port);
+            info.finish(sh, Outcome::Blocked, Some(403), None);
+            return empty_response(StatusCode::FORBIDDEN).into();
+        }
+        let addrs = match sh.destinations.resolve(host, port).await {
             Ok(addrs) => addrs,
             Err(ResolveError::Blocked(ip)) => {
                 Stats::inc(&sh.stats.blocked_destinations);
@@ -257,6 +279,8 @@ impl HttpHandler for CacheHandler {
     async fn should_intercept_connect(&mut self, _ctx: &HttpContext, req: &Request<Body>) -> bool {
         let host = req.uri().host().unwrap_or_default();
         let yes = self.shared.cfg.should_intercept(host);
+        // Hudsucker solo lee el SNI si se intercepta: en los demás túneles no hay nada que comparar.
+        self.connect_host = yes.then(|| host.to_owned());
         if !yes {
             Stats::inc(&self.shared.stats.tls_passthrough);
         }
@@ -271,8 +295,14 @@ impl HttpHandler for CacheHandler {
         let yes = sni.map(|sni| self.shared.cfg.should_intercept(sni)).unwrap_or(false);
         let s = &self.shared.stats;
         Stats::inc(if yes { &s.tls_intercepted } else { &s.tls_passthrough });
+        if let (Some(sni), Some(connect)) = (sni, self.connect_host.as_deref()) {
+            if canonical_host(sni) != canonical_host(connect) {
+                self.shared.detector.host_mismatch(ctx.client_addr.ip(), "El SNI no coincide con el destino del CONNECT.");
+            }
+        }
         if !yes {
             self.shared.client_stats.record(ctx.client_addr.ip(), Outcome::Tunnel, None);
+            self.shared.detector.observe(ctx.client_addr.ip(), None, None);
             self.shared.access_log.record(Record {
                 client: ctx.client_addr.ip(),
                 method: Method::CONNECT.as_str(),
@@ -301,11 +331,13 @@ impl HttpHandler for CacheHandler {
             ClientDecision::Denied => {
                 Stats::inc(&sh.stats.denied_clients);
                 tracing::debug!(%client, "cliente no permitido");
+                sh.detector.observe(client, Some(403), None);
                 return empty_response(StatusCode::FORBIDDEN).into();
             }
             ClientDecision::RateLimited => {
                 Stats::inc(&sh.stats.rate_limited);
                 sh.client_stats.record_rate_limited(client);
+                sh.detector.observe(client, Some(429), None);
                 tracing::debug!(%client, "límite de peticiones superado");
                 let mut res = empty_response(StatusCode::TOO_MANY_REQUESTS);
                 res.headers_mut().insert(header::RETRY_AFTER, HeaderValue::from_static("60"));
@@ -340,6 +372,13 @@ impl HttpHandler for CacheHandler {
         }
         Stats::inc(&sh.stats.requests);
         let host = req.uri().host().unwrap_or(url.hostname());
+        if sh.detector.enabled() {
+            if let Some(declared) = req.headers().get(header::HOST) {
+                if host_differs(declared, host) {
+                    sh.detector.host_mismatch(client, "El Host no coincide con el destino de la petición.");
+                }
+            }
+        }
         let info = Arc::new(RequestInfo::new(client, started, &req, Some(&url.scheme), host));
 
         let scope_ok = match url.scheme.as_str() {
@@ -567,6 +606,17 @@ impl HttpHandler for CacheHandler {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn compara_el_host_sin_contar_puerto_mayusculas_ni_punto_final() {
+        let differs = |value: &str, uri: &str| host_differs(&HeaderValue::from_str(value).unwrap(), uri);
+        assert!(!differs("cdn.example.com", "cdn.example.com"));
+        assert!(!differs("CDN.example.com:8443", "cdn.example.com"));
+        assert!(!differs("cdn.example.com.", "cdn.example.com"));
+        assert!(!differs("[::1]:8080", "[::1]"));
+        assert!(differs("otro.example.com", "cdn.example.com"));
+        assert!(differs("no es un host", "cdn.example.com"));
+    }
 
     #[test]
     fn el_registro_no_incluye_parametros() {

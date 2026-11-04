@@ -16,6 +16,9 @@ pub struct Config {
     /// Redes internas que los clientes SÍ pueden alcanzar a través del proxy, como una intranet.
     /// Todas las demás, incluidos este equipo y la red local, están bloqueadas.
     pub allowed_internal_networks: Vec<String>,
+    /// Puertos a los que se puede abrir un túnel con CONNECT. Vacío = cualquiera, lo que permitiría
+    /// usar el proxy, por ejemplo, para enviar correo por el puerto 25.
+    pub allowed_connect_ports: Vec<u16>,
     /// Memoria total para objetos en RAM. Lo que no quepa se atiende en streaming, sin caché.
     pub max_buffered_bytes: u64,
     /// Segundos que una petición espera a otra igual que ya fue al origen (0 = no esperar).
@@ -69,6 +72,14 @@ pub struct Config {
     /// Totales por cliente en memoria, visibles solo con el token. Apagado por defecto:
     /// son datos sobre personas. El aviso de transparencia indica si está activo.
     pub client_stats_enabled: bool,
+    /// Avisos de actividad inusual por IP, solo en memoria y visibles solo con el token.
+    /// El aviso de transparencia indica si están activos.
+    pub detections_enabled: bool,
+    /// Umbrales por IP y minuto de los avisos anteriores. 0 desactiva esa regla.
+    pub detect_requests_per_minute: u64,
+    pub detect_bytes_per_minute: u64,
+    /// Respuestas 403 o 404, del origen o del propio proxy.
+    pub detect_denied_per_minute: u64,
     /// Log de acceso por petición. Apagado por defecto: registra actividad de personas, y
     /// activarlo debe ser una decisión deliberada. El aviso de transparencia indica si está activo.
     pub access_log_enabled: bool,
@@ -106,6 +117,7 @@ impl Default for Config {
             allowed_clients: vec!["127.0.0.1/32".into(), "::1/128".into()],
             rate_limit_per_minute: 6000,
             allowed_internal_networks: vec![],
+            allowed_connect_ports: vec![80, 443],
             max_buffered_bytes: 512 * 1024 * 1024,
             coalesce_wait_secs: 10,
             data_dir: "./data".into(),
@@ -150,6 +162,11 @@ impl Default for Config {
             alert_ca_days: 30,
             alert_origin_error_percent: 20,
             client_stats_enabled: false,
+            detections_enabled: true,
+            // La mitad del límite por IP: se avisa antes de empezar a rechazar.
+            detect_requests_per_minute: 3000,
+            detect_bytes_per_minute: 1024 * 1024 * 1024,
+            detect_denied_per_minute: 100,
             access_log_enabled: false,
             access_log_dir: "./logs".into(),
             access_log_retention_days: 7,
@@ -159,6 +176,10 @@ impl Default for Config {
 }
 
 impl Config {
+    pub fn connect_port_allowed(&self, port: u16) -> bool {
+        self.allowed_connect_ports.is_empty() || self.allowed_connect_ports.contains(&port)
+    }
+
     /// Carga la configuración; si el archivo no existe, escribe uno por defecto.
     pub fn load_or_create(path: &Path) -> anyhow::Result<Self> {
         if path.exists() {
@@ -187,7 +208,7 @@ impl Config {
     }
 }
 
-fn canonical_host(host: &str) -> String {
+pub fn canonical_host(host: &str) -> String {
     host.trim_end_matches('.').to_ascii_lowercase()
 }
 
@@ -215,6 +236,16 @@ mod tests {
         assert!(!old.access_log_enabled);
         assert!(!old.client_stats_enabled);
         assert_eq!(old.access_log_retention_days, 7);
+    }
+
+    #[test]
+    fn por_defecto_los_tuneles_solo_van_a_la_web() {
+        let cfg = Config::default();
+        assert!(cfg.connect_port_allowed(443) && cfg.connect_port_allowed(80));
+        assert!(!cfg.connect_port_allowed(25) && !cfg.connect_port_allowed(8443));
+        assert!(Config { allowed_connect_ports: vec![], ..Config::default() }.connect_port_allowed(25));
+        let old: Config = toml::from_str("listen = \"127.0.0.1:3128\"").unwrap();
+        assert!(!old.connect_port_allowed(25), "una configuración anterior también queda protegida");
     }
 
     #[test]

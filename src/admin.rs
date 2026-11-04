@@ -6,6 +6,7 @@
 
 use crate::clients::ClientStats;
 use crate::config::Config;
+use crate::detect::Detector;
 use crate::monitor::Monitor;
 use crate::secure::{random_bytes, write_private};
 use crate::stats::Stats;
@@ -35,6 +36,7 @@ struct AdminState {
     stats: Arc<Stats>,
     monitor: Arc<Monitor>,
     clients: Arc<ClientStats>,
+    detector: Arc<Detector>,
 }
 
 /// Lee el token o, si no existe, crea uno. Su valor nunca se escribe en el registro.
@@ -96,6 +98,7 @@ fn summary(state: &AdminState) -> serde_json::Value {
     value["alerts"] = serde_json::json!(state.monitor.active());
     value["ca_not_after"] = state.monitor.ca_not_after().into();
     value["client_stats_enabled"] = state.clients.enabled().into();
+    value["detections_enabled"] = state.detector.enabled().into();
     value
 }
 
@@ -108,7 +111,7 @@ fn route(method: &Method, path: &str, authorization: Option<&HeaderValue>, state
         "/" => return panel_page(),
         "/panel.css" => return respond(StatusCode::OK, "text/css; charset=utf-8", PANEL_CSS),
         "/panel.js" => return respond(StatusCode::OK, "text/javascript; charset=utf-8", PANEL_JS),
-        "/metrics" | "/api/summary" | "/api/clients" => {}
+        "/metrics" | "/api/summary" | "/api/clients" | "/api/detections" => {}
         _ => return plain(StatusCode::NOT_FOUND, "no existe\n"),
     }
     if !is_authorized(authorization, &state.token) {
@@ -122,12 +125,13 @@ fn route(method: &Method, path: &str, authorization: Option<&HeaderValue>, state
             respond(StatusCode::OK, "text/plain; version=0.0.4; charset=utf-8", text)
         }
         "/api/summary" => json(&summary(state)),
+        "/api/detections" => json(&serde_json::json!({ "enabled": state.detector.enabled(), "events": state.detector.events() })),
         _ => json(&serde_json::json!({ "enabled": state.clients.enabled(), "clients": state.clients.rows() })),
     }
 }
 
 /// Abre el puerto. Si no se puede, el proxy no arranca: mejor saberlo que quedarse sin métricas.
-pub async fn start(cfg: &Config, stats: Arc<Stats>, monitor: Arc<Monitor>, clients: Arc<ClientStats>) -> anyhow::Result<()> {
+pub async fn start(cfg: &Config, stats: Arc<Stats>, monitor: Arc<Monitor>, clients: Arc<ClientStats>, detector: Arc<Detector>) -> anyhow::Result<()> {
     let listen = cfg.admin_listen.trim();
     if listen.is_empty() {
         return Ok(());
@@ -140,7 +144,7 @@ pub async fn start(cfg: &Config, stats: Arc<Stats>, monitor: Arc<Monitor>, clien
     }
     tracing::info!("panel en http://{addr}/ y métricas en /metrics (token en {})", cfg.admin_token_file.display());
 
-    let state = Arc::new(AdminState { token, stats, monitor, clients });
+    let state = Arc::new(AdminState { token, stats, monitor, clients, detector });
     tokio::spawn(async move {
         loop {
             let Ok((stream, _)) = listener.accept().await else {
@@ -167,6 +171,7 @@ pub async fn start(cfg: &Config, stats: Arc<Stats>, monitor: Arc<Monitor>, clien
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::detect::Limits;
     use crate::stats::Outcome;
     use http_body_util::BodyExt;
 
@@ -178,6 +183,7 @@ mod tests {
             stats: Arc::new(Stats::default()),
             monitor: Arc::new(Monitor::new(99)),
             clients: Arc::new(ClientStats::new(true)),
+            detector: Arc::new(Detector::new(true, Limits { requests_per_minute: 0, bytes_per_minute: 0, denied_per_minute: 0 }, Arc::new(Stats::default()))),
         }
     }
 
@@ -197,7 +203,7 @@ mod tests {
     #[test]
     fn todos_los_datos_exigen_el_token() {
         let good = format!("Bearer {TOKEN}");
-        for path in ["/metrics", "/api/summary", "/api/clients"] {
+        for path in ["/metrics", "/api/summary", "/api/clients", "/api/detections"] {
             assert_eq!(status(Method::GET, path, Some(&good)), StatusCode::OK, "{path}");
             assert_eq!(status(Method::GET, path, None), StatusCode::UNAUTHORIZED, "{path}");
             assert_eq!(status(Method::GET, path, Some("Bearer incorrecto")), StatusCode::UNAUTHORIZED, "{path}");
@@ -250,6 +256,23 @@ mod tests {
         let value: serde_json::Value = serde_json::from_str(&text).unwrap();
         assert_eq!(value["clients"][0]["ip"], "10.9.8.7");
         assert_eq!(value["clients"][0]["bytes_from_copy"], 1);
+    }
+
+    #[tokio::test]
+    async fn las_ips_de_las_detecciones_solo_salen_en_su_ruta() {
+        let state = state();
+        state.detector.rare_port("10.9.8.7".parse().unwrap(), 25);
+        let auth = format!("Bearer {TOKEN}");
+        let text = body(get(&state, Method::GET, "/api/summary", Some(&auth))).await;
+        assert!(!text.contains("10.9.8.7"));
+        let text = body(get(&state, Method::GET, "/metrics", Some(&auth))).await;
+        assert!(!text.contains("10.9.8.7"));
+
+        let text = body(get(&state, Method::GET, "/api/detections", Some(&auth))).await;
+        let value: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(value["enabled"], true);
+        assert_eq!(value["events"][0]["ip"], "10.9.8.7");
+        assert_eq!(value["events"][0]["kind"], "rare_port");
     }
 
     #[test]

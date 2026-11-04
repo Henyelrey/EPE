@@ -74,6 +74,19 @@
   </div>
 
   <section class="card">
+    <h2>Actividad inusual</h2>
+    <p id="detections-off" class="muted" hidden>Desactivado. Se activa con <code>detections_enabled = true</code>, y el aviso a los usuarios lo indicará.</p>
+    <p id="detections-empty" class="muted" hidden>Sin avisos en el último día.</p>
+    <div id="detections-wrap" class="table-scroll" tabindex="0" role="region" aria-label="Avisos de actividad inusual" hidden>
+      <table>
+        <thead><tr><th scope="col">Aviso</th><th scope="col">IP</th><th scope="col" class="num">Veces</th><th scope="col">Último</th><th scope="col">Detalle</th></tr></thead>
+        <tbody id="detections-table"></tbody>
+      </table>
+    </div>
+    <p id="detections-note" class="muted note" hidden>Una IP señala un equipo, no a una persona, y un volumen alto puede ser una actualización legítima. Estos avisos no bloquean nada; solo se rechazan los túneles a puertos no permitidos. Se olvidan tras un día o al reiniciar.</p>
+  </section>
+
+  <section class="card">
     <h2>Por cliente</h2>
     <p id="clients-off" class="muted" hidden>Desactivado. Se activa con <code>client_stats_enabled = true</code>, y el aviso a los usuarios lo indicará.</p>
     <p id="clients-empty" class="muted" hidden>Todavía no hay actividad.</p>

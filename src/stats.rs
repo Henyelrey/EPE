@@ -134,6 +134,13 @@ pub struct Stats {
     pub denied_clients: AtomicU64,
     pub rate_limited: AtomicU64,
     pub blocked_destinations: AtomicU64,
+    /// Túneles rechazados por pedir un puerto que no está en `allowed_connect_ports`.
+    pub blocked_ports: AtomicU64,
+    /// Avisos de actividad inusual por tipo. Sin IPs: esas solo están en memoria, en detect.rs.
+    pub detections_volume: AtomicU64,
+    pub detections_denied: AtomicU64,
+    pub detections_rare_port: AtomicU64,
+    pub detections_host_mismatch: AtomicU64,
     /// Peticiones atendidas sin caché porque no había memoria disponible.
     pub over_budget: AtomicU64,
     /// Peticiones que esperaron a otra igual en vez de ir al origen de inmediato.
@@ -186,6 +193,16 @@ pub struct Snapshot {
     denied_clients: u64,
     rate_limited: u64,
     blocked_destinations: u64,
+    #[serde(skip)]
+    blocked_ports: u64,
+    #[serde(skip)]
+    detections_volume: u64,
+    #[serde(skip)]
+    detections_denied: u64,
+    #[serde(skip)]
+    detections_rare_port: u64,
+    #[serde(skip)]
+    detections_host_mismatch: u64,
     over_budget: u64,
     coalesced: u64,
     #[serde(skip)]
@@ -290,6 +307,11 @@ impl Stats {
             denied_clients: self.denied_clients.load(Relaxed),
             rate_limited: self.rate_limited.load(Relaxed),
             blocked_destinations: self.blocked_destinations.load(Relaxed),
+            blocked_ports: self.blocked_ports.load(Relaxed),
+            detections_volume: self.detections_volume.load(Relaxed),
+            detections_denied: self.detections_denied.load(Relaxed),
+            detections_rare_port: self.detections_rare_port.load(Relaxed),
+            detections_host_mismatch: self.detections_host_mismatch.load(Relaxed),
             over_budget: self.over_budget.load(Relaxed),
             coalesced: self.coalesced.load(Relaxed),
             corrupt_objects: self.corrupt_objects.load(Relaxed),
@@ -308,7 +330,7 @@ impl Stats {
     }
 
     /// Lo que se conserva entre reinicios. Las medidas del disco no: se vuelven a tomar al arrancar.
-    fn persistent(&self) -> [(&'static str, &AtomicU64); 26] {
+    fn persistent(&self) -> [(&'static str, &AtomicU64); 31] {
         [
             ("since", &self.since),
             ("requests", &self.requests),
@@ -328,6 +350,11 @@ impl Stats {
             ("denied_clients", &self.denied_clients),
             ("rate_limited", &self.rate_limited),
             ("blocked_destinations", &self.blocked_destinations),
+            ("blocked_ports", &self.blocked_ports),
+            ("detections_volume", &self.detections_volume),
+            ("detections_denied", &self.detections_denied),
+            ("detections_rare_port", &self.detections_rare_port),
+            ("detections_host_mismatch", &self.detections_host_mismatch),
             ("over_budget", &self.over_budget),
             ("coalesced", &self.coalesced),
             ("corrupt_objects", &self.corrupt_objects),
@@ -353,6 +380,13 @@ impl Stats {
             }
         }
         Ok(())
+    }
+
+    pub fn detections_total(&self) -> u64 {
+        [&self.detections_volume, &self.detections_denied, &self.detections_rare_port, &self.detections_host_mismatch]
+            .iter()
+            .map(|counter| counter.load(Relaxed))
+            .sum()
     }
 
     /// Anota la fecha de inicio la primera vez que se empieza a contar.
@@ -395,7 +429,13 @@ impl Stats {
                 "evicted_bytes": s.evicted_bytes,
             },
             "tls": { "intercepted": s.tls_intercepted, "passthrough": s.tls_passthrough },
-            "rejections": { "client": s.denied_clients, "rate_limit": s.rate_limited, "destination": s.blocked_destinations },
+            "rejections": { "client": s.denied_clients, "rate_limit": s.rate_limited, "destination": s.blocked_destinations, "port": s.blocked_ports },
+            "detections": {
+                "volume": s.detections_volume,
+                "denied": s.detections_denied,
+                "rare_port": s.detections_rare_port,
+                "host_mismatch": s.detections_host_mismatch,
+            },
             "health": {
                 "corrupt_objects": s.corrupt_objects,
                 "store_write_errors": s.store_write_errors,
@@ -455,7 +495,19 @@ impl Stats {
             "rayo_rejections_total",
             "Peticiones rechazadas por motivo.",
             "reason",
-            &[("client", s.denied_clients), ("rate_limit", s.rate_limited), ("destination", s.blocked_destinations)],
+            &[("client", s.denied_clients), ("rate_limit", s.rate_limited), ("destination", s.blocked_destinations), ("port", s.blocked_ports)],
+        );
+        labeled(
+            &mut out,
+            "rayo_detections_total",
+            "Avisos de actividad inusual por tipo.",
+            "kind",
+            &[
+                ("volume", s.detections_volume),
+                ("denied", s.detections_denied),
+                ("rare_port", s.detections_rare_port),
+                ("host_mismatch", s.detections_host_mismatch),
+            ],
         );
         single(&mut out, "rayo_over_budget_total", "counter", "Peticiones atendidas sin caché por falta de memoria.", s.over_budget);
         single(&mut out, "rayo_coalesced_total", "counter", "Peticiones que esperaron a otra igual.", s.coalesced);

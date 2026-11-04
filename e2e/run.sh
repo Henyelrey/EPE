@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Prueba de punta a punta: origen de laboratorio (HTTP :8080 / HTTPS :8443) + varios proxies en :3129-3137, :3139 y :3146-3149.
+# Prueba de punta a punta: origen de laboratorio (HTTP :8080 / HTTPS :8443) + varios proxies en :3129-3137, :3139 y :3146-3153.
 # Requiere: openssl, python3 y curl. No hace falta tocar el archivo hosts: usa localhost (se intercepta)
 # y 127.0.0.1 (no se intercepta). Sale con código 1 si alguna verificación falla.
 #
@@ -23,7 +23,8 @@ printf "subjectAltName=DNS:localhost,IP:127.0.0.1\nbasicConstraints=CA:FALSE\nex
 openssl x509 -req -in origin.csr -CA origin-ca.pem -CAkey origin-ca.key -CAcreateserial -out origin.pem -days 2 -extfile ext.cnf 2>/dev/null
 
 # Escribe config.<nombre>.toml. Se puede ajustar con LISTEN, CLIENTS, RATE, INTERNAL, BUDGET, DOMAINS, CONTACT,
-# ADMIN, ADMIN_TOKEN, LOG_ENABLED, LOG_DAYS, LOG_IP, MAX_DISK, ALERT_DISK_FREE, ALERT_CA_DAYS y CLIENT_STATS.
+# ADMIN, ADMIN_TOKEN, LOG_ENABLED, LOG_DAYS, LOG_IP, MAX_DISK, ALERT_DISK_FREE, ALERT_CA_DAYS, CLIENT_STATS, PORTS,
+# DETECT, DETECT_REQUESTS, DETECT_BYTES y DETECT_DENIED.
 write_config() {
   local listen="${LISTEN:-127.0.0.1:$2}" clients="${CLIENTS:-[\"127.0.0.1/32\", \"::1/128\"]}"
   local internal="${INTERNAL:-[\"127.0.0.0/8\", \"::1/128\"]}" domains="${DOMAINS:-[\"localhost\"]}"
@@ -34,6 +35,7 @@ operator_contact = "$contact"
 allowed_clients = $clients
 rate_limit_per_minute = ${RATE:-0}
 allowed_internal_networks = $internal
+allowed_connect_ports = ${PORTS:-[80, 443, 8443]}
 max_buffered_bytes = ${BUDGET:-67108864}
 data_dir = "./data-$1"
 ca_cert = "./ca/rayo-ca.crt"
@@ -56,6 +58,10 @@ maintenance_interval_secs = 1
 alert_disk_free_percent = ${ALERT_DISK_FREE:-0}
 alert_ca_days = ${ALERT_CA_DAYS:-30}
 client_stats_enabled = ${CLIENT_STATS:-false}
+detections_enabled = ${DETECT:-true}
+detect_requests_per_minute = ${DETECT_REQUESTS:-3000}
+detect_bytes_per_minute = ${DETECT_BYTES:-1073741824}
+detect_denied_per_minute = ${DETECT_DENIED:-100}
 access_log_enabled = ${LOG_ENABLED:-false}
 access_log_dir = "./logs-$1"
 access_log_retention_days = ${LOG_DAYS:-7}
@@ -96,6 +102,10 @@ LOG_ENABLED=true LOG_IP=none LOG_DAYS=3 start_proxy anon 3139
 ADMIN=127.0.0.1:3147 MAX_DISK=220000 start_proxy capped 3146
 CAPPED_PID=${PIDS[-1]}
 ADMIN=127.0.0.1:3149 ALERT_CA_DAYS=5000 ALERT_DISK_FREE=100 CLIENT_STATS=true start_proxy alerting 3148
+# Cada ráfaga de las pruebas es más del doble de su umbral: aunque caiga entre dos minutos, uno lo alcanza.
+ADMIN=127.0.0.1:3151 LOG_ENABLED=true DETECT_REQUESTS=20 DETECT_BYTES=200000 DETECT_DENIED=5 start_proxy watcher 3150
+WATCHER_PID=${PIDS[-1]}
+ADMIN=127.0.0.1:3153 DETECT=false PORTS='[]' start_proxy unwatched 3152
 
 FAILS=0
 expect() { # descripción, esperado, obtenido
@@ -548,6 +558,92 @@ sleep 1.5
 expect "y no se guarda en disco"             "0" "$(grep -c '127.0.0.1' data-alerting/stats.json)"
 page=$(body http://rayo.aviso/)
 expect "el aviso indica que está activo"     "si" "$(has "$page" 'Totales por dispositivo: activados')"
+
+section "23. Puertos de los túneles"
+PX=http://127.0.0.1:3150
+ADMIN_URL=http://127.0.0.1:3151
+# Espera hasta $2 segundos a que una serie de /metrics pase de cero, y dice si lo hizo.
+wait_over() {
+  local i
+  for ((i = 0; i < $2 * 4; i++)); do
+    [ "$(over "$(prom "$1")" 0)" = si ] && break
+    sleep 0.25
+  done
+  over "$(prom "$1")" 0
+}
+connect_status() { curlx --max-time 10 -o /dev/null -w '%{http_connect}' "$1"; }
+detection() { api $ADMIN_URL/api/detections | field "[e[\"$2\"] for e in v[\"events\"] if e[\"kind\"]==\"$1\"][0]"; }
+expect "sin actividad inusual no hay avisos" "0" "$(prom 'rayo_alert{name="detections"}')"
+expect "un puerto no permitido se rechaza"   "403" "$(connect_status https://localhost:25/)"
+expect "antes de resolver el nombre"         "403" "$(connect_status https://no-existe.invalid:25/)"
+expect "se cuenta como rechazo"              "2" "$(prom 'rayo_rejections_total{reason="port"}')"
+expect "y como aviso"                        "2" "$(prom 'rayo_detections_total{kind="rare_port"}')"
+expect "un puerto permitido sigue pasando"   "200 MISS" "$(px $L/static.js)"
+sleep 0.5
+expect "queda en el log de acceso"           "2" "$(log_count watcher 'l["result"]=="blocked" and l["port"]==25 and l["status"]==403')"
+expect "sin lista de puertos no se rechaza"  "200" "$(PX=http://127.0.0.1:3152 connect_status https://localhost:25/)"
+expect "una configuración sin límite lo advierte" "si" "$(has "$(sed 's/\x1b\[[0-9;]*m//g' unwatched.log)" 'allowed_connect_ports')"
+
+section "24. Nombres que no coinciden"
+mismatches() { prom 'rayo_detections_total{kind="host_mismatch"}'; }
+expect "un Host normal no avisa"             "0" "$(px -H 'Host: LOCALHOST:8443' $L/static.js >/dev/null; mismatches)"
+expect "un Host ajeno no cambia el destino"  "200 HIT" "$(px -H 'Host: otra.invalid' $L/static.js)"
+expect "pero avisa"                          "1" "$(mismatches)"
+expect "tampoco cambia la clave por HTTP"    "200 MISS" "$(px -H 'Host: otra.invalid' http://localhost:8080/copia.js)"
+expect "y se comparte con quien pide bien"   "200 HIT" "$(px http://localhost:8080/copia.js)"
+expect "también avisa por HTTP"              "2" "$(mismatches)"
+expect "un SNI distinto pasa cifrado"        "Lab Origin CA" "$(issuer localhost:8443 otro.invalid)"
+expect "y avisa"                             "3" "$(mismatches)"
+issuer localhost:8443 localhost >/dev/null
+expect "un SNI correcto no avisa"            "3" "$(mismatches)"
+issuer 127.0.0.1:8443 otro.invalid >/dev/null
+expect "en un túnel sin interceptar no se puede saber" "3" "$(mismatches)"
+
+section "25. Volumen y rechazos por IP"
+for n in 1 2 3 4 5 6 7 8 9; do px "http://localhost:8080/blob/$n" >/dev/null; done
+expect "muchos bytes avisan"                 "si" "$(wait_over 'rayo_detections_total{kind="volume"}' 4)"
+expect "y dicen por qué, sin contar túneles" "si" "$(has "$(detection volume detail)" 'sin contar túneles')"
+for n in $(seq 1 41); do px http://localhost:8080/copia.js >/dev/null; done
+expect "muchas peticiones avisan"            "si" "$(has "$(detection volume detail)" '20 peticiones')"
+expect "con su propio conteo"                "si" "$(over "$(detection volume count)" 1)"
+expect "pocos rechazos no avisan"            "0" "$(prom 'rayo_detections_total{kind="denied"}')"
+for n in $(seq 1 11); do px http://localhost:8080/no-existe >/dev/null; done
+expect "muchos 404 avisan"                   "si" "$(wait_over 'rayo_detections_total{kind="denied"}' 4)"
+
+section "26. Quién ve las detecciones"
+expect "activan una alerta"                  "1" "$(wait_prom 'rayo_alert{name="detections"}' 1 4)"
+line=$(sed 's/\x1b\[[0-9;]*m//g' watcher.log | grep 'alerta="detections"' | head -1)
+expect "que queda en el registro"            "si" "$(has "$line" 'avisos de actividad inusual')"
+expect "sin la IP"                           "no" "$(has "$line" '127.0.0.1')"
+expect "el detalle exige el token"           "401" "$(admin_status $ADMIN_URL/api/detections)"
+events=$(api $ADMIN_URL/api/detections)
+expect "con el token se ve la IP"            "127.0.0.1" "$(detection rare_port ip)"
+expect "y el último puerto"                  "si" "$(has "$(detection rare_port detail)" '25')"
+expect "pero no los sitios"                  "no no no" "$(has "$events" 'localhost') $(has "$events" 'invalid') $(has "$events" 'no-existe')"
+expect "ni la IP sale en el resumen"         "no" "$(has "$(api $ADMIN_URL/api/summary)" '127.0.0.1')"
+expect "ni en las métricas"                  "no" "$(has "$(curl -s --noproxy "*" -H "Authorization: Bearer $TOKEN" $ADMIN_URL/metrics)" '127.0.0.1')"
+expect "las estadísticas públicas no cambian" "ausente ausente" "$(metric blocked_ports) $(metric detections_volume)"
+page=$(body http://rayo.aviso/)
+expect "el aviso dice que están activas"     "si" "$(has "$page" 'Detección de actividad inusual: activada')"
+expect "y qué puertos se permiten"           "si" "$(has "$page" 'a estos puertos: 80, 443, 8443.')"
+
+sleep 1.5
+rare_before=$(prom 'rayo_detections_total{kind="rare_port"}')
+expect "en disco no queda la IP"             "0" "$(grep -c '127.0.0.1' data-watcher/stats.json)"
+kill "$WATCHER_PID"
+sleep 1
+launch_proxy watcher 3150
+expect "al reiniciar se olvidan las IPs"     "[]" "$(api $ADMIN_URL/api/detections | field 'v["events"]')"
+expect "y se conservan los totales"          "$rare_before" "$(prom 'rayo_detections_total{kind="rare_port"}')"
+
+PX=http://127.0.0.1:3152
+ADMIN_URL=http://127.0.0.1:3153
+px -H 'Host: otra.invalid' http://localhost:8080/copia.js >/dev/null
+expect "apagadas no guardan nada"            "False []" "$(api $ADMIN_URL/api/detections | field 'str(v["enabled"]) + " " + str(v["events"])')"
+expect "ni cuentan"                          "0" "$(mismatches)"
+page=$(body http://rayo.aviso/)
+expect "y el aviso lo dice"                  "si" "$(has "$page" 'Detección de actividad inusual: desactivada')"
+expect "igual que los puertos abiertos"      "si" "$(has "$page" 'a cualquier puerto público')"
 
 echo
 if [ "$FAILS" -eq 0 ]; then

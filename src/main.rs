@@ -11,6 +11,7 @@ mod ca;
 mod clients;
 mod coalesce;
 mod config;
+mod detect;
 mod handler;
 mod memory;
 mod monitor;
@@ -74,21 +75,33 @@ async fn main() -> anyhow::Result<()> {
     if cfg.client_stats_enabled {
         tracing::info!("totales por cliente activos, solo en memoria. El aviso a los usuarios lo indica.");
     }
+    if cfg.detections_enabled {
+        tracing::info!("detecciones de actividad inusual activas, solo en memoria. El aviso a los usuarios lo indica.");
+    }
+    if cfg.allowed_connect_ports.is_empty() {
+        tracing::warn!("allowed_connect_ports está vacío: los clientes pueden abrir túneles a cualquier puerto público.");
+    }
     if cfg.max_disk_bytes > 0 && cfg.max_disk_bytes < cfg.max_object_bytes as u64 {
         tracing::warn!("max_disk_bytes es menor que max_object_bytes: un objeto grande expulsaría toda la caché.");
     }
 
     let access_log = access_log::AccessLog::start(&cfg, stats.clone())?;
     let client_stats = Arc::new(clients::ClientStats::new(cfg.client_stats_enabled));
+    let limits = detect::Limits {
+        requests_per_minute: cfg.detect_requests_per_minute,
+        bytes_per_minute: cfg.detect_bytes_per_minute,
+        denied_per_minute: cfg.detect_denied_per_minute,
+    };
+    let detector = Arc::new(detect::Detector::new(cfg.detections_enabled, limits, stats.clone()));
     let health = Arc::new(monitor::Monitor::new(ca_summary.not_after));
-    admin::start(&cfg, stats.clone(), health.clone(), client_stats.clone()).await?;
-    monitor::start(&cfg, stats.clone(), client_stats.clone(), health);
+    admin::start(&cfg, stats.clone(), health.clone(), client_stats.clone(), detector.clone()).await?;
+    monitor::start(&cfg, stats.clone(), client_stats.clone(), detector.clone(), health);
 
     let data_dir = cfg.data_dir.clone();
     let final_stats = stats.clone();
     let memory = memory::MemoryBudget::new(cfg.max_buffered_bytes);
     let flights = coalesce::Flights::new(cfg.coalesce_wait_secs);
-    let shared = Arc::new(Shared { cfg, store, stats, normalizer, clients, destinations, memory, flights, access_log, client_stats, notice });
+    let shared = Arc::new(Shared { cfg, store, stats, normalizer, clients, destinations, memory, flights, access_log, client_stats, detector, notice });
 
     let proxy = Proxy::builder()
         .with_addr(addr)

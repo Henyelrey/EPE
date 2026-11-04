@@ -63,6 +63,12 @@ pub fn render(cfg: &Config, ca: &CaSummary, detailed_logs: bool) -> String {
     } else {
         "<li>Totales por dispositivo: desactivados. Si se activaran, quien administra el proxy podría ver cuánto usa cada IP, y este aviso lo indicaría.</li>"
     };
+    let detections = if cfg.detections_enabled {
+        "<li><strong>Detección de actividad inusual: activada.</strong> Si un dispositivo pide un volumen muy alto, recibe muchos rechazos, intenta abrir un puerto no permitido o declara un nombre que no coincide con su destino, \
+         quien administra el proxy ve su IP, el tipo de aviso, cuántas veces ocurrió, cuándo y, si aplica, el puerto, pero no qué sitios. Solo está en memoria y se olvida tras un día o al reiniciar el proxy. Los totales por tipo, sin IP, se conservan.</li>"
+    } else {
+        "<li>Detección de actividad inusual: desactivada. Si se activara, quien administra el proxy podría ver la IP de los dispositivos con actividad inusual, y este aviso lo indicaría.</li>"
+    };
     let retention = if cfg.max_disk_bytes > 0 {
         "Cuando el disco llega al límite configurado, se borran las usadas hace más tiempo. Si no se llega, pueden permanecer hasta que quien administra el proxy las elimine."
     } else {
@@ -75,6 +81,12 @@ pub fn render(cfg: &Config, ca: &CaSummary, detailed_logs: bool) -> String {
         )
     } else {
         String::new()
+    };
+    let connect_ports = if cfg.allowed_connect_ports.is_empty() {
+        "<li>Las conexiones cifradas pueden abrirse a cualquier puerto público.</li>".to_owned()
+    } else {
+        let ports: Vec<String> = cfg.allowed_connect_ports.iter().map(u16::to_string).collect();
+        format!("<li>Las conexiones cifradas solo pueden abrirse a estos puertos: {}.</li>", ports.join(", "))
     };
     let scope = match &ca.permitted {
         Some(domains) => format!(
@@ -128,6 +140,7 @@ footer {{ margin-top: 3rem; color: var(--muted); font-size: .875rem; }}
 <li><strong>Registro del proxy:</strong> la dirección de cada contenido servido desde la copia o guardado por primera vez, sin sus parámetros, y el destino de las conexiones que fallan, sin tu IP. El proxy no lo conserva por sí mismo en un archivo; si quien lo administra lo guarda, su conservación depende de esa persona.</li>
 {access_log}
 {client_stats}
+{detections}
 <li><strong>Contadores:</strong> totales generales, tiempos de respuesta y uso de disco, sin datos por persona. Se conservan al reiniciar el proxy.</li>
 </ul>
 <p>{detailed}</p>
@@ -136,6 +149,7 @@ footer {{ margin-top: 3rem; color: var(--muted); font-size: .875rem; }}
 <h2>Límites de seguridad</h2>
 <ul>
 {rate_limit}<li>A través del proxy no se puede llegar a este equipo ni a la red local, salvo las redes que quien lo administra haya permitido.</li>
+{connect_ports}
 </ul>
 
 <h2>Comprueba tu certificado</h2>
@@ -220,6 +234,19 @@ mod tests {
         assert!(page.contains("Totales por dispositivo: activados"));
         assert!(page.contains("pero no qué sitios"));
         assert!(page.contains("No se borran solas"));
+    }
+
+    #[test]
+    fn indica_las_detecciones_y_los_puertos_permitidos() {
+        let page = render(&cfg(), &ca(None), false);
+        assert!(page.contains("Detección de actividad inusual: activada"));
+        assert!(page.contains("pero no qué sitios"));
+        assert!(page.contains("a estos puertos: 80, 443."));
+
+        let open = Config { detections_enabled: false, allowed_connect_ports: vec![], ..cfg() };
+        let page = render(&open, &ca(None), false);
+        assert!(page.contains("Detección de actividad inusual: desactivada"));
+        assert!(page.contains("a cualquier puerto público"));
     }
 
     #[test]

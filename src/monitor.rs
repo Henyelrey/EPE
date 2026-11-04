@@ -5,6 +5,7 @@
 
 use crate::clients::ClientStats;
 use crate::config::Config;
+use crate::detect::Detector;
 use crate::stats::Stats;
 use crate::store::{disk_space, now, write_atomic};
 use serde::Serialize;
@@ -22,7 +23,7 @@ const WINDOW_TICKS: usize = 5;
 const MIN_REQUESTS_FOR_RATE: u64 = 10;
 const SECS_PER_DAY: i64 = 86_400;
 
-pub const ALERT_NAMES: [&str; 6] = ["disk_space", "disk_limit", "ca_expiry", "origin_errors", "corrupt_objects", "store_writes"];
+pub const ALERT_NAMES: [&str; 7] = ["disk_space", "disk_limit", "ca_expiry", "origin_errors", "corrupt_objects", "store_writes", "detections"];
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Alert {
@@ -45,6 +46,7 @@ struct Sample {
     origin_errors: u64,
     corrupt_objects: u64,
     store_write_errors: u64,
+    detections: u64,
 }
 
 impl Sample {
@@ -57,6 +59,7 @@ impl Sample {
             origin_errors: stats.origin_errors.load(Relaxed),
             corrupt_objects: stats.corrupt_objects.load(Relaxed),
             store_write_errors: stats.store_write_errors.load(Relaxed),
+            detections: stats.detections_total(),
         }
     }
 
@@ -66,6 +69,7 @@ impl Sample {
             origin_errors: self.origin_errors.saturating_sub(earlier.origin_errors),
             corrupt_objects: self.corrupt_objects.saturating_sub(earlier.corrupt_objects),
             store_write_errors: self.store_write_errors.saturating_sub(earlier.store_write_errors),
+            detections: self.detections.saturating_sub(earlier.detections),
         }
     }
 }
@@ -80,7 +84,7 @@ struct Inputs {
     recent: Sample,
 }
 
-fn format_bytes(bytes: u64) -> String {
+pub fn format_bytes(bytes: u64) -> String {
     const GIB: f64 = 1024.0 * 1024.0 * 1024.0;
     const MIB: f64 = 1024.0 * 1024.0;
     let value = bytes as f64;
@@ -124,6 +128,10 @@ fn evaluate(i: &Inputs, t: &Thresholds) -> Vec<Alert> {
     }
     if r.store_write_errors > 0 {
         add("store_writes", format!("{} respuestas no se pudieron guardar en los últimos minutos. Revisa el disco y los permisos.", r.store_write_errors));
+    }
+    // El mensaje queda en el registro, que puede guardarse: la IP solo se ve en el panel.
+    if r.detections > 0 {
+        add("detections", format!("{} avisos de actividad inusual en los últimos minutos. El detalle está en el panel.", r.detections));
     }
     alerts
 }
@@ -200,7 +208,7 @@ pub async fn save_stats(data_dir: &Path, stats: &Stats) {
 }
 
 /// Lanza la pasada periódica.
-pub fn start(cfg: &Config, stats: Arc<Stats>, clients: Arc<ClientStats>, monitor: Arc<Monitor>) {
+pub fn start(cfg: &Config, stats: Arc<Stats>, clients: Arc<ClientStats>, detector: Arc<Detector>, monitor: Arc<Monitor>) {
     let data_dir = cfg.data_dir.clone();
     let every = Duration::from_secs(cfg.maintenance_interval_secs.max(1));
     let thresholds = Thresholds {
@@ -234,6 +242,7 @@ pub fn start(cfg: &Config, stats: Arc<Stats>, clients: Arc<ClientStats>, monitor
             };
             monitor.update(evaluate(&inputs, &thresholds));
             clients.forget_idle();
+            detector.forget_old();
             save_stats(&data_dir, &stats).await;
         }
     });
@@ -306,6 +315,15 @@ mod tests {
     }
 
     #[test]
+    fn una_deteccion_avisa_sin_decir_que_ip_fue() {
+        let recent = Sample { detections: 2, ..Sample::default() };
+        let inputs = Inputs { recent, ..calm() };
+        assert_eq!(names(&inputs), ["detections"]);
+        let message = &evaluate(&inputs, &THRESHOLDS)[0].message;
+        assert!(message.contains("2 avisos") && message.contains("panel"));
+    }
+
+    #[test]
     fn las_metricas_incluyen_todas_las_alertas() {
         let monitor = Monitor::new(123);
         monitor.update(vec![Alert { name: "ca_expiry", message: "x".into() }]);
@@ -319,9 +337,9 @@ mod tests {
 
     #[test]
     fn la_ventana_cuenta_solo_lo_ocurrido_desde_entonces() {
-        let now = Sample { finished: 10, origin_errors: 5, corrupt_objects: 1, store_write_errors: 0 };
-        let then = Sample { finished: 4, origin_errors: 5, corrupt_objects: 0, store_write_errors: 0 };
-        assert_eq!(now.since(then), Sample { finished: 6, origin_errors: 0, corrupt_objects: 1, store_write_errors: 0 });
+        let now = Sample { finished: 10, origin_errors: 5, corrupt_objects: 1, ..Sample::default() };
+        let then = Sample { finished: 4, origin_errors: 5, ..Sample::default() };
+        assert_eq!(now.since(then), Sample { finished: 6, corrupt_objects: 1, ..Sample::default() });
     }
 
     #[tokio::test]

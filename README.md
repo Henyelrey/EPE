@@ -41,6 +41,7 @@ Reglas de seguridad incluidas:
 - Objetos más grandes que `max_object_bytes` pasan en streaming sin cargar todo en memoria.
 - Solo los clientes de `allowed_clients` pueden usar el proxy, con un máximo de `rate_limit_per_minute` peticiones por IP.
 - Los clientes no alcanzan este equipo ni la red local a través del proxy, salvo las redes de `allowed_internal_networks`.
+- Los túneles solo se abren a los puertos de `allowed_connect_ports`, por defecto 80 y 443.
 - La CA solo puede firmar para los dominios configurados al generarla, y su llave solo la puede leer el usuario que ejecuta el proxy.
 - Si un objeto no cabe en `max_buffered_bytes`, se atiende en streaming, sin caché.
 - Si varios clientes piden a la vez un objeto que no está, solo uno va al origen y los demás esperan hasta `coalesce_wait_secs`.
@@ -86,7 +87,7 @@ Por defecto solo acepta conexiones de este mismo equipo. Para abrirlo a tu red:
 4. **Si generaste una CA con una versión anterior,** el proxy avisa al arrancar de que no tiene límites. Bórrala de cada dispositivo (en Windows: `certutil -delstore ROOT "Rayo Cache Local CA"`), borra `ca/`, arranca para generar otra y reinstálala.
 5. **Avisa a los usuarios antes de que instalen la CA.** Completa `operator_contact` en `config.toml` y entrega la plantilla [docs/AVISO.md](docs/AVISO.md). Cualquier cliente permitido puede comprobar en `http://rayo.aviso/` los dominios que se descifran, qué registros están activos y la huella del certificado. La página se genera con la configuración real al arrancar.
 
-Un cliente permitido todavía puede abrir túneles a cualquier puerto de una IP pública.
+**Puertos.** Un túnel a un puerto que no esté en `allowed_connect_ports` recibe un 403. Si alguien necesita otro, como el 8443 o el 22, agrégalo a la lista; dejarla vacía permite cualquier puerto y el proxy lo advierte al arrancar. El límite solo aplica a `CONNECT`: una petición `http://` sin cifrar puede seguir dirigiéndose a cualquier puerto público.
 
 ### Cómo leer las estadísticas
 
@@ -129,6 +130,28 @@ Se evalúan cada `maintenance_interval_secs` (por defecto 60). Se ven en el pane
 | `origin_errors` | En las últimas 5 pasadas, al menos `alert_origin_error_percent` (20 %) de las peticiones no pudo contactar al origen, con un mínimo de 10 peticiones. |
 | `corrupt_objects` | Se descartó algún objeto corrupto en las últimas 5 pasadas. |
 | `store_writes` | Alguna respuesta no se pudo guardar en las últimas 5 pasadas. |
+| `detections` | Hubo algún aviso de actividad inusual en las últimas 5 pasadas. La línea del registro no incluye la IP. |
+
+### Detecciones
+
+Avisan de actividad inusual por IP, pero no bloquean nada: la IP señala un equipo y no a una persona, y un volumen alto puede ser una actualización legítima. Vienen activas (`detections_enabled`), y el aviso de `http://rayo.aviso/` lo indica.
+
+| Aviso | Se anota cuando | Umbral |
+|---|---|---|
+| Volumen alto | Una IP llega al umbral de peticiones o de bytes en un minuto. | `detect_requests_per_minute` (3000), `detect_bytes_per_minute` (1 GiB) |
+| Muchos rechazos | Una IP recibe demasiadas respuestas 403 o 404 en un minuto, del origen o del proxy. | `detect_denied_per_minute` (100) |
+| Puerto no permitido | Se pide un túnel a un puerto fuera de `allowed_connect_ports`. | Cada intento |
+| Nombre que no coincide | El SNI difiere del `CONNECT`, o el `Host` difiere del destino de la petición. | Cada vez |
+
+Un umbral en `0` desactiva esa regla. El panel muestra la IP, el tipo de aviso, cuántas veces ocurrió, cuándo y el último puerto, pero nunca qué sitios. Solo vive en memoria y se olvida tras un día o al reiniciar; lo único que se conserva son los totales por tipo, sin IP. Guarda hasta 256 avisos: al llenarse, descarta el más antiguo.
+
+Lo que no pueden ver:
+
+- **Túneles sin interceptar:** Hudsucker no expone sus bytes ni lee su SNI, así que no cuentan para el volumen en bytes ni para los nombres que no coinciden.
+- **Ráfagas entre dos minutos:** se cuenta por minuto de reloj, así que una ráfaga repartida entre dos minutos puede no llegar al umbral.
+- **Muchas direcciones:** en cada minuto se siguen hasta 4096 IPs; las que no quepan no se cuentan hasta el minuto siguiente.
+
+Un `Host` falso no cambia el destino ni la clave de caché, que salen de la URI. Para llevar esto a un SIEM, usa `rayo_detections_total` en `/metrics` y el log de acceso en JSONL, que registra los túneles rechazados con su puerto.
 
 ### Métricas para Prometheus
 
@@ -157,6 +180,8 @@ Además de los contadores de arriba, `/metrics` incluye lo que no se publica en 
 | `rayo_disk_used_bytes`, `rayo_disk_limit_bytes`, `rayo_disk_objects` | Lo que ocupa la caché, su límite y cuántos objetos tiene. |
 | `rayo_disk_free_bytes`, `rayo_disk_total_bytes` | Espacio del volumen, medido cada `maintenance_interval_secs`. |
 | `rayo_evicted_entries_total`, `rayo_evicted_bytes_total` | Lo expulsado por el límite de disco. |
+| `rayo_detections_total{kind}` | Avisos de actividad inusual por tipo (`volume`, `denied`, `rare_port`, `host_mismatch`), sin IP. |
+| `rayo_rejections_total{reason="port"}` | Túneles rechazados por pedir un puerto no permitido. No se publica en `http://rayo.stats/`. |
 | `rayo_alert{name}`, `rayo_ca_not_after_seconds` | Si cada alerta está activa, y cuándo vence la CA. |
 | `rayo_access_log_dropped_total`, `rayo_access_log_errors_total` | Líneas perdidas del log de acceso y errores al escribirlo. |
 | `rayo_uptime_seconds` | Tiempo desde el arranque. |
@@ -197,7 +222,7 @@ cargo build --release
 ./e2e/run.sh                     # origen de laboratorio + proxy; termina con error si algo falla
 ```
 
-El e2e requiere bash, `openssl`, `python3` y `curl`, y usa los puertos 3129-3137, 3139, 3146-3149, 8080 y 8443. En Windows se ejecuta desde Git Bash.
+El e2e requiere bash, `openssl`, `python3` y `curl`, y usa los puertos 3129-3137, 3139, 3146-3153, 8080 y 8443. En Windows se ejecuta desde Git Bash.
 
 El e2e verifica, entre otras cosas, que 20 peticiones simultáneas a un objeto nuevo causan 1 sola descarga al origen. No prueba clientes en otras máquinas ni navegadores: conviene probar la CA limitada en los navegadores de tu red antes de repartirla.
 

@@ -11,6 +11,14 @@ const ALERT_INFO = {
   store_writes: { title: "Fallos al guardar en disco", severity: "critical" },
   ca_expiry: { title: "Certificado por vencer", severity: "warning" },
   origin_errors: { title: "Errores al contactar orígenes", severity: "warning" },
+  detections: { title: "Actividad inusual", severity: "warning" },
+};
+
+const DETECTION_TITLES = {
+  volume: "Volumen alto",
+  denied: "Muchos rechazos",
+  rare_port: "Puerto no permitido",
+  host_mismatch: "Nombre que no coincide",
 };
 
 const $ = (id) => document.getElementById(id);
@@ -221,6 +229,7 @@ function renderSummary(summary) {
     ["Clientes rechazados", numberFormat.format(summary.rejections.client)],
     ["Peticiones sobre el límite por IP", numberFormat.format(summary.rejections.rate_limit)],
     ["Destinos internos bloqueados", numberFormat.format(summary.rejections.destination)],
+    ["Túneles a puertos no permitidos", numberFormat.format(summary.rejections.port)],
     ["Atendidas sin caché por falta de memoria", numberFormat.format(summary.health.over_budget)],
     ["Objetos corruptos", numberFormat.format(summary.health.corrupt_objects)],
     ["Fallos al guardar en disco", numberFormat.format(summary.health.store_write_errors)],
@@ -250,6 +259,27 @@ function renderClients(data) {
   }
 }
 
+function renderDetections(data) {
+  const events = data.events;
+  $("detections-off").hidden = data.enabled;
+  $("detections-empty").hidden = !data.enabled || events.length > 0;
+  $("detections-wrap").hidden = events.length === 0;
+  $("detections-note").hidden = !data.enabled;
+  const body = $("detections-table");
+  body.replaceChildren();
+  for (const event of events) {
+    const tr = element("tr");
+    tr.append(
+      element("td", "nowrap", DETECTION_TITLES[event.kind] || event.kind),
+      element("td", "nowrap", event.ip),
+      element("td", "num", numberFormat.format(event.count)),
+      element("td", "nowrap", dateTimeFormat.format(new Date(event.last_seen * 1000))),
+      element("td", "detail", event.detail),
+    );
+    body.append(tr);
+  }
+}
+
 function showLogin(message) {
   $("dashboard").hidden = true;
   $("logout").hidden = true;
@@ -265,12 +295,13 @@ let timer = null;
 async function refresh() {
   clearTimeout(timer);
   try {
-    const [summary, clients] = await Promise.all([fetchJson("/api/summary"), fetchJson("/api/clients")]);
+    const [summary, clients, detections] = await Promise.all([fetchJson("/api/summary"), fetchJson("/api/clients"), fetchJson("/api/detections")]);
     $("login").hidden = true;
     $("logout").hidden = false;
     $("dashboard").hidden = false;
     $("dashboard").classList.remove("stale");
     renderSummary(summary);
+    renderDetections(detections);
     renderClients(clients);
     $("freshness").textContent = `Actualizado a las ${timeFormat.format(new Date())}`;
   } catch (error) {

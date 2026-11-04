@@ -118,6 +118,8 @@ th, td { padding: .5rem .75rem .5rem 0; border-bottom: 1px solid var(--grid); }
 tr:last-child td { border-bottom: 0; }
 .num { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
 td.num + td:not(.num) { padding-left: .75rem; }
+.nowrap { white-space: nowrap; }
+.detail { min-width: 16rem; }
 
 .meter-block + .meter-block { margin-top: 1rem; }
 .meter-label { display: flex; justify-content: space-between; gap: 1rem; flex-wrap: wrap; font-size: .875rem; color: var(--ink-2); margin-bottom: .375rem; }
