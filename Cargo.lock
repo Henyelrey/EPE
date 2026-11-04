@@ -1117,9 +1117,11 @@ dependencies = [
  "sha2",
  "tokio",
  "toml",
+ "tower-service",
  "tracing",
  "tracing-subscriber",
  "webpki-roots 1.0.10",
+ "x509-parser",
 ]
 
 [[package]]

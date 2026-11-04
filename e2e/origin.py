@@ -1,5 +1,5 @@
 """Origen de prueba: HTTP en :8080 y HTTPS en :8443. Cuenta cuántas veces se le pide cada ruta."""
-import http.server, ssl, threading, json, sys, os
+import http.server, ssl, threading, json, sys, os, time
 
 HITS = {}
 LIB = b"/* libreria */ " + b"x" * 50_000
@@ -52,6 +52,14 @@ class H(http.server.BaseHTTPRequestHandler):
             # Origen que arma la respuesta con una cabecera que no forma parte de la clave de caché.
             host = self.headers.get("X-Forwarded-Host", "cdn.legit")
             return self.send(200, f'<script src="//{host}/app.js"></script>'.encode(), {"Cache-Control": "max-age=60"})
+        if path == "/slow":
+            # Objeto cacheable que tarda: varios clientes simultáneos deben compartir una sola descarga.
+            time.sleep(1)
+            return self.send(200, b"lento", {"Cache-Control": "max-age=60"})
+        if path == "/slow-private":
+            # Igual, pero no cacheable: los clientes no deben quedar atendidos en fila.
+            time.sleep(1)
+            return self.send(200, b"lento y privado", {"Cache-Control": "no-store"})
         if path == "/big":
             return self.send(200, b"B" * 2_500_000, {"Cache-Control": "max-age=60"}, chunked=True)
         if path == "/__hits":

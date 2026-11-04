@@ -8,6 +8,18 @@ use std::path::{Path, PathBuf};
 pub struct Config {
     /// Dirección donde escucha el proxy (configúralo como proxy HTTP/HTTPS en el navegador o SO).
     pub listen: String,
+    /// IPs o subredes (CIDR) que pueden usar el proxy. Para abrirlo a la red, agrega su subred
+    /// aquí y cambia `listen`; el proxy no arranca si eso lo dejaría abierto a cualquiera.
+    pub allowed_clients: Vec<String>,
+    /// Peticiones por minuto que se aceptan de cada IP (0 = sin límite).
+    pub rate_limit_per_minute: u32,
+    /// Redes internas que los clientes SÍ pueden alcanzar a través del proxy, como una intranet.
+    /// Todas las demás, incluidos este equipo y la red local, están bloqueadas.
+    pub allowed_internal_networks: Vec<String>,
+    /// Memoria total para objetos en RAM. Lo que no quepa se atiende en streaming, sin caché.
+    pub max_buffered_bytes: u64,
+    /// Segundos que una petición espera a otra igual que ya fue al origen (0 = no esperar).
+    pub coalesce_wait_secs: u64,
     /// Carpeta donde se guardan objetos (por hash de contenido) y metadatos.
     pub data_dir: PathBuf,
     /// Certificado y llave de la CA local. Si no existen, se generan al arrancar.
@@ -52,6 +64,11 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             listen: "127.0.0.1:3128".into(),
+            allowed_clients: vec!["127.0.0.1/32".into(), "::1/128".into()],
+            rate_limit_per_minute: 6000,
+            allowed_internal_networks: vec![],
+            max_buffered_bytes: 512 * 1024 * 1024,
+            coalesce_wait_secs: 10,
             data_dir: "./data".into(),
             ca_cert: "./ca/rayo-ca.crt".into(),
             ca_key: "./ca/rayo-ca.key".into(),

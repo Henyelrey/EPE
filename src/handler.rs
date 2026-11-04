@@ -1,6 +1,9 @@
-//! Lógica del proxy: decide qué descifrar, sirve HITs, guarda MISSes y revalida con ETag.
+//! Lógica del proxy: controla el acceso, decide qué descifrar, sirve HITs, guarda MISSes y revalida con ETag.
 
+use crate::access::{literal_ip, ClientDecision, ClientGate, DestinationPolicy, ResolveError};
+use crate::coalesce::{Entry, FlightGuard, Flights};
 use crate::config::Config;
+use crate::memory::{MemoryBudget, Reservation};
 use crate::policy::{self, AbsUrl, KeyNormalizer};
 use crate::stats::Stats;
 use crate::store::{now, Meta, PutOutcome, Store};
@@ -8,7 +11,7 @@ use bytes::{Bytes, BytesMut};
 use http_body_util::BodyExt;
 use hudsucker::futures::{stream, StreamExt};
 use hudsucker::hyper::header::{self, HeaderValue};
-use hudsucker::hyper::{Request, Response, StatusCode};
+use hudsucker::hyper::{Method, Request, Response, StatusCode, Uri};
 use hudsucker::rustls::server::ClientHello;
 use hudsucker::{Body, HttpContext, HttpHandler, RequestOrResponse};
 use std::sync::Arc;
@@ -16,8 +19,12 @@ use std::sync::Arc;
 pub struct Shared {
     pub cfg: Config,
     pub store: Store,
-    pub stats: Stats,
+    pub stats: Arc<Stats>,
     pub normalizer: KeyNormalizer,
+    pub clients: ClientGate,
+    pub destinations: Arc<DestinationPolicy>,
+    pub memory: MemoryBudget,
+    pub flights: Flights,
 }
 
 /// Lo que se recuerda entre `handle_request` y `handle_response` del mismo intercambio.
@@ -25,8 +32,11 @@ struct Pending {
     url: String,
     key: String,
     key_hash: String,
-    /// Copia vencida que se está revalidando con If-None-Match / If-Modified-Since.
-    stale: Option<Arc<Meta>>,
+    /// Copia vencida que se está revalidando con If-None-Match / If-Modified-Since,
+    /// con su memoria ya reservada para poder servirla si el origen responde 304.
+    stale: Option<(Arc<Meta>, Arc<Reservation>)>,
+    /// Quienes piden lo mismo esperan hasta que esto se suelte, con la respuesta ya guardada.
+    _flight: Option<FlightGuard>,
 }
 
 /// Qué falta por contar de la petición en curso cuando llegue la respuesta o el error del origen.
@@ -60,11 +70,19 @@ fn count_bypass(shared: Arc<Shared>, body: Body) -> Body {
     )
 }
 
-fn bad_gateway() -> Response<Body> {
-    Response::builder()
-        .status(StatusCode::BAD_GATEWAY)
-        .body(Body::empty())
-        .expect("respuesta estática válida")
+/// Mantiene reservada la memoria hasta que el cliente termine de recibir el cuerpo.
+fn hold<R: Send + Sync + 'static>(body: Body, reservation: R) -> Body {
+    Body::from(
+        body.map_frame(move |frame| {
+            let _ = &reservation;
+            frame
+        })
+        .boxed(),
+    )
+}
+
+fn empty_response(status: StatusCode) -> Response<Body> {
+    Response::builder().status(status).body(Body::empty()).expect("respuesta estática válida")
 }
 
 impl CacheHandler {
@@ -72,20 +90,26 @@ impl CacheHandler {
         Self { shared, exchange: Exchange::Untracked }
     }
 
-    async fn serve_from_cache(&self, meta: &Meta, status: &'static str) -> Option<Response<Body>> {
+    async fn serve_from_cache<R: Send + Sync + 'static>(
+        &self,
+        meta: &Meta,
+        status: &'static str,
+        reservation: R,
+    ) -> Option<Response<Body>> {
         let body = self.shared.store.read_object(meta).await?;
         let mut b = Response::builder().status(StatusCode::OK);
         for (k, v) in &meta.headers {
             b = b.header(k.as_str(), v.as_str());
         }
         let age = now().saturating_sub(meta.stored_at);
+        let len = body.len();
         let res = b
-            .header(header::CONTENT_LENGTH, body.len())
+            .header(header::CONTENT_LENGTH, len)
             .header(header::AGE, age)
             .header("x-rayo-cache", status)
-            .body(Body::from(body.clone()))
+            .body(hold(Body::from(body), reservation))
             .ok()?;
-        Stats::add(&self.shared.stats.bytes_from_cache, body.len() as u64);
+        Stats::add(&self.shared.stats.bytes_from_cache, len as u64);
         Some(res)
     }
 
@@ -95,6 +119,38 @@ impl CacheHandler {
             .header(header::CONTENT_TYPE, "application/json")
             .body(Body::from(json))
             .expect("respuesta estática válida")
+    }
+
+    /// Valida el destino de un CONNECT antes de abrir el túnel.
+    async fn guard_connect(&self, mut req: Request<Body>) -> RequestOrResponse {
+        let sh = &self.shared;
+        let Some(authority) = req.uri().authority().cloned() else {
+            return req.into();
+        };
+        let host = authority.host();
+        let addrs = match sh.destinations.resolve(host, authority.port_u16().unwrap_or(443)).await {
+            Ok(addrs) => addrs,
+            Err(ResolveError::Blocked(ip)) => {
+                Stats::inc(&sh.stats.blocked_destinations);
+                tracing::debug!(host, %ip, "CONNECT a destino interno bloqueado");
+                return empty_response(StatusCode::FORBIDDEN).into();
+            }
+            Err(ResolveError::Lookup(e)) => {
+                tracing::debug!(host, error = %e, "CONNECT a un nombre que no resuelve");
+                return empty_response(StatusCode::BAD_GATEWAY).into();
+            }
+        };
+        tracing::debug!(host, "CONNECT autorizado");
+        // Un túnel lo abre Hudsucker, que volvería a resolver el nombre y podría recibir una IP interna.
+        // Por eso se fija la IP ya validada. A cambio, el túnel no prueba las demás IPs del nombre.
+        // No afecta a TLS: el SNI y el certificado siguen siendo un asunto entre cliente y origen.
+        if !sh.cfg.should_intercept(host) {
+            let target = addrs.iter().find(|a| a.is_ipv4()).or_else(|| addrs.first());
+            if let Some(uri) = target.and_then(|a| a.to_string().parse::<Uri>().ok()) {
+                *req.uri_mut() = uri;
+            }
+        }
+        req.into()
     }
 }
 
@@ -119,13 +175,40 @@ impl HttpHandler for CacheHandler {
         yes
     }
 
-    async fn handle_request(&mut self, _ctx: &HttpContext, mut req: Request<Body>) -> RequestOrResponse {
-        let sh = &self.shared;
+    async fn handle_request(&mut self, ctx: &HttpContext, mut req: Request<Body>) -> RequestOrResponse {
+        let sh = self.shared.clone();
         self.exchange = Exchange::Untracked;
 
+        // El control de acceso va primero: un cliente no permitido no llega a nada más, ni a las estadísticas.
+        let client = ctx.client_addr.ip();
+        match sh.clients.check(client) {
+            ClientDecision::Allow => {}
+            ClientDecision::Denied => {
+                Stats::inc(&sh.stats.denied_clients);
+                tracing::debug!(%client, "cliente no permitido");
+                return empty_response(StatusCode::FORBIDDEN).into();
+            }
+            ClientDecision::RateLimited => {
+                Stats::inc(&sh.stats.rate_limited);
+                tracing::debug!(%client, "límite de peticiones superado");
+                let mut res = empty_response(StatusCode::TOO_MANY_REQUESTS);
+                res.headers_mut().insert(header::RETRY_AFTER, HeaderValue::from_static("60"));
+                return res.into();
+            }
+        }
+
         // Hudsucker también pasa aquí el CONNECT inicial del túnel: no es contenido.
-        if req.method() == hudsucker::hyper::Method::CONNECT {
-            return req.into();
+        if req.method() == Method::CONNECT {
+            return self.guard_connect(req).await;
+        }
+
+        // Las IPs literales no pasan por el resolvedor protegido: se validan aquí.
+        if let Some(ip) = req.uri().host().and_then(literal_ip) {
+            if !sh.destinations.permits(ip) {
+                Stats::inc(&sh.stats.blocked_destinations);
+                tracing::debug!(%ip, "petición a destino interno bloqueada");
+                return empty_response(StatusCode::FORBIDDEN).into();
+            }
         }
 
         let Some(url) = AbsUrl::from_request(&req) else {
@@ -155,34 +238,55 @@ impl HttpHandler for CacheHandler {
         let normalized = sh.normalizer.normalize(&url);
         let key = format!("{normalized}|{}", policy::encoding_bucket(req.headers()));
         let key_hash = Store::key_hash(&key);
+        let client_conditional =
+            req.headers().contains_key(header::IF_NONE_MATCH) || req.headers().contains_key(header::IF_MODIFIED_SINCE);
+
+        let mut cached = sh.store.get(&key_hash).await;
+        let mut flight = None;
+        // Si el cliente valida su propia copia, el origen le responde solo a él: no hay nada que compartir.
+        if !client_conditional && !cached.as_ref().is_some_and(|m| m.is_fresh()) {
+            match sh.flights.enter(&key_hash).await {
+                Entry::Leader(guard) => flight = Some(guard),
+                Entry::Waited => {
+                    Stats::inc(&sh.stats.coalesced);
+                    cached = sh.store.get(&key_hash).await;
+                }
+                Entry::Disabled => {}
+            }
+        }
 
         let mut stale = None;
-        if let Some(meta) = sh.store.get(&key_hash).await {
-            if meta.is_fresh() {
-                if let Some(res) = self.serve_from_cache(&meta, "HIT").await {
-                    Stats::inc(&sh.stats.hits);
-                    tracing::info!(url = %normalized, "HIT");
-                    return res.into();
-                }
-            } else {
+        if let Some(meta) = cached {
+            let needs_read = meta.is_fresh()
+                || (!client_conditional && (meta.etag.is_some() || meta.last_modified.is_some()));
+            if needs_read {
+                let Some(reservation) = sh.memory.try_reserve(meta.size) else {
+                    Stats::inc(&sh.stats.over_budget);
+                    self.exchange = Exchange::Bypass;
+                    return req.into();
+                };
+                if meta.is_fresh() {
+                    if let Some(res) = self.serve_from_cache(&meta, "HIT", reservation).await {
+                        Stats::inc(&sh.stats.hits);
+                        tracing::info!(url = %normalized, "HIT");
+                        return res.into();
+                    }
                 // Vencido: se pide al origen solo si cambió (ahorra el cuerpo completo si responde 304).
                 // Antes se verifica la copia: si está dañada, un 304 no serviría de nada y hay que pedir el cuerpo.
-                let h = req.headers_mut();
-                let client_conditional = h.contains_key(header::IF_NONE_MATCH) || h.contains_key(header::IF_MODIFIED_SINCE);
-                let has_validator = meta.etag.is_some() || meta.last_modified.is_some();
-                if !client_conditional && has_validator && sh.store.read_object(&meta).await.is_some() {
+                } else if sh.store.read_object(&meta).await.is_some() {
+                    let h = req.headers_mut();
                     if let Some(v) = meta.etag.as_deref().and_then(|e| HeaderValue::from_str(e).ok()) {
                         h.insert(header::IF_NONE_MATCH, v);
                     }
                     if let Some(v) = meta.last_modified.as_deref().and_then(|e| HeaderValue::from_str(e).ok()) {
                         h.insert(header::IF_MODIFIED_SINCE, v);
                     }
-                    stale = Some(meta);
+                    stale = Some((meta, Arc::new(reservation)));
                 }
             }
         }
 
-        self.exchange = Exchange::Candidate(Arc::new(Pending { url: normalized, key, key_hash, stale }));
+        self.exchange = Exchange::Candidate(Arc::new(Pending { url: normalized, key, key_hash, stale, _flight: flight }));
         req.into()
     }
 
@@ -199,14 +303,14 @@ impl HttpHandler for CacheHandler {
 
         // 1) Revalidación exitosa: el origen confirma que nuestra copia sigue válida.
         if res.status() == StatusCode::NOT_MODIFIED {
-            let Some(meta) = &p.stale else {
+            let Some((meta, reservation)) = &p.stale else {
                 // El 304 responde a la validación que envió el propio cliente, no a la nuestra.
                 Stats::inc(&sh.stats.bypass);
                 return res;
             };
             let ttl = policy::ttl_secs(res.headers(), sh.cfg.default_ttl_secs);
             let _ = sh.store.refresh(&p.key_hash, meta, ttl).await;
-            if let Some(cached) = self.serve_from_cache(meta, "REVALIDATED").await {
+            if let Some(cached) = self.serve_from_cache(meta, "REVALIDATED", reservation.clone()).await {
                 Stats::inc(&sh.stats.revalidated);
                 tracing::info!(url = %p.url, "REVALIDATED (304)");
                 return cached;
@@ -215,7 +319,7 @@ impl HttpHandler for CacheHandler {
             // no pidió un 304, así que no se le puede reenviar: recibe un error y puede reintentar.
             Stats::inc(&sh.stats.cache_errors);
             tracing::warn!(url = %p.url, "copia ilegible tras un 304 del origen");
-            return bad_gateway();
+            return empty_response(StatusCode::BAD_GATEWAY);
         }
 
         // 2) No cacheable: se reenvía tal cual, en streaming.
@@ -224,16 +328,29 @@ impl HttpHandler for CacheHandler {
             return res.map(|body| count_bypass(sh, body));
         }
 
-        // 3) Se acumula el cuerpo hasta el límite. Si lo supera, se reenvía sin guardar.
+        // 3) Se acumula el cuerpo hasta el límite o hasta agotar la memoria disponible.
+        //    Si no cabe, se reenvía sin guardar.
         let (mut parts, mut body) = res.into_parts();
         let mut buf = BytesMut::new();
+        let mut reservation: Option<Reservation> = None;
         let max = sh.cfg.max_object_bytes;
         let complete = loop {
             match body.frame().await {
                 None => break true,
                 Some(Ok(frame)) => {
                     if let Ok(data) = frame.into_data() {
+                        let more = sh.memory.try_reserve(data.len() as u64);
+                        let reserved = more.is_some();
+                        match (&mut reservation, more) {
+                            (Some(held), Some(more)) => held.merge(more),
+                            (held, more) if more.is_some() => *held = more,
+                            _ => {}
+                        }
                         buf.extend_from_slice(&data);
+                        if !reserved {
+                            Stats::inc(&sh.stats.over_budget);
+                            break false;
+                        }
                         if buf.len() > max {
                             break false;
                         }
@@ -242,7 +359,7 @@ impl HttpHandler for CacheHandler {
                 Some(Err(e)) => {
                     Stats::inc(&sh.stats.origin_errors);
                     tracing::warn!(url = %p.url, error = %e, "error leyendo cuerpo del origen");
-                    return bad_gateway();
+                    return empty_response(StatusCode::BAD_GATEWAY);
                 }
             }
         };
@@ -252,7 +369,7 @@ impl HttpHandler for CacheHandler {
             Stats::add(&sh.stats.bytes_bypass, buf.len() as u64);
             let head = stream::once(async move { Ok::<Bytes, hudsucker::Error>(buf.freeze()) });
             let rest = count_bypass(sh, body).into_data_stream();
-            return Response::from_parts(parts, Body::from_stream(head.chain(rest)));
+            return Response::from_parts(parts, hold(Body::from_stream(head.chain(rest)), reservation));
         }
 
         let bytes = buf.freeze();
@@ -290,7 +407,7 @@ impl HttpHandler for CacheHandler {
         parts.headers.remove(header::TRANSFER_ENCODING);
         parts.headers.insert(header::CONTENT_LENGTH, HeaderValue::from(bytes.len()));
         parts.headers.insert("x-rayo-cache", HeaderValue::from_static("MISS"));
-        Response::from_parts(parts, Body::from(bytes))
+        Response::from_parts(parts, hold(Body::from(bytes), reservation))
     }
 
     async fn handle_error(&mut self, _ctx: &HttpContext, err: hyper_util::client::legacy::Error) -> Response<Body> {
@@ -298,6 +415,6 @@ impl HttpHandler for CacheHandler {
             Stats::inc(&self.shared.stats.origin_errors);
         }
         tracing::warn!(error = ?err, "no se pudo contactar al origen");
-        bad_gateway()
+        empty_response(StatusCode::BAD_GATEWAY)
     }
 }

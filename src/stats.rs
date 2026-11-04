@@ -27,6 +27,14 @@ pub struct Stats {
     pub bytes_bypass: AtomicU64,
     pub tls_intercepted: AtomicU64,
     pub tls_passthrough: AtomicU64,
+    /// Rechazos antes de contar la petición: cliente no permitido, límite por IP y destino interno.
+    pub denied_clients: AtomicU64,
+    pub rate_limited: AtomicU64,
+    pub blocked_destinations: AtomicU64,
+    /// Peticiones atendidas sin caché porque no había memoria disponible.
+    pub over_budget: AtomicU64,
+    /// Peticiones que esperaron a otra igual en vez de ir al origen de inmediato.
+    pub coalesced: AtomicU64,
 }
 
 #[derive(Serialize)]
@@ -46,6 +54,11 @@ pub struct Snapshot {
     byte_hit_ratio: f64,
     tls_intercepted: u64,
     tls_passthrough: u64,
+    denied_clients: u64,
+    rate_limited: u64,
+    blocked_destinations: u64,
+    over_budget: u64,
+    coalesced: u64,
 }
 
 impl Stats {
@@ -76,6 +89,11 @@ impl Stats {
             byte_hit_ratio: if total == 0 { 0.0 } else { cache as f64 / total as f64 },
             tls_intercepted: self.tls_intercepted.load(Relaxed),
             tls_passthrough: self.tls_passthrough.load(Relaxed),
+            denied_clients: self.denied_clients.load(Relaxed),
+            rate_limited: self.rate_limited.load(Relaxed),
+            blocked_destinations: self.blocked_destinations.load(Relaxed),
+            over_budget: self.over_budget.load(Relaxed),
+            coalesced: self.coalesced.load(Relaxed),
         }
     }
 }

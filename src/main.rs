@@ -4,9 +4,12 @@
 //! Luego configura 127.0.0.1:3128 como proxy HTTP y HTTPS e instala ca/rayo-ca.crt
 //! en el almacén de confianza de TUS dispositivos.
 
+mod access;
 mod ca;
+mod coalesce;
 mod config;
 mod handler;
+mod memory;
 mod policy;
 mod stats;
 mod store;
@@ -27,18 +30,25 @@ async fn main() -> anyhow::Result<()> {
     let cfg = config::Config::load_or_create(&cfg_path)?;
     let addr: SocketAddr = cfg.listen.parse()?;
 
-    let ca = ca::load_or_generate(&cfg.ca_cert, &cfg.ca_key)?;
+    let clients = access::ClientGate::new(&cfg, addr)?;
+    let destinations = Arc::new(access::DestinationPolicy::new(&cfg)?);
+    let stats = Arc::new(stats::Stats::default());
+
+    let ca = ca::load_or_generate(&cfg.ca_cert, &cfg.ca_key, &cfg.intercept_domains)?;
     let store = store::Store::open(&cfg.data_dir, cfg.mem_index_entries).await?;
     let normalizer = policy::KeyNormalizer::new(&cfg)?;
-    let connector = upstream::connector(&cfg.upstream_extra_ca)?;
+    let connector = upstream::connector(&cfg.upstream_extra_ca, destinations.clone(), stats.clone())?;
 
     tracing::info!(
-        "escuchando en {addr} | intercepta TLS de {} dominio(s), el resto va en passthrough | stats: http://{}/",
+        "escuchando en {addr} | clientes permitidos: {:?} | intercepta TLS de {} dominio(s), el resto va en passthrough | stats: http://{}/",
+        cfg.allowed_clients,
         cfg.intercept_domains.len(),
         cfg.stats_host
     );
 
-    let shared = Arc::new(Shared { cfg, store, stats: Default::default(), normalizer });
+    let memory = memory::MemoryBudget::new(cfg.max_buffered_bytes);
+    let flights = coalesce::Flights::new(cfg.coalesce_wait_secs);
+    let shared = Arc::new(Shared { cfg, store, stats, normalizer, clients, destinations, memory, flights });
 
     let proxy = Proxy::builder()
         .with_addr(addr)

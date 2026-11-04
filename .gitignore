@@ -1,13 +1,13 @@
 target/
 data/
 ca/
-e2e/data/
+config.toml
+e2e/data-*/
 e2e/ca/
 e2e/*.key
 e2e/*.pem
 e2e/*.csr
 e2e/*.srl
 e2e/*.log
-e2e/config.e2e.toml
-e2e/ext.cnf
-config.toml
+e2e/*.cnf
+e2e/config.*.toml

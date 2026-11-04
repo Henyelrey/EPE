@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Prueba de punta a punta: origen de laboratorio (HTTP :8080 / HTTPS :8443) + proxy en :3129.
+# Prueba de punta a punta: origen de laboratorio (HTTP :8080 / HTTPS :8443) + varios proxies en :3129-3133.
 # Requiere: openssl, python3 y curl. No hace falta tocar el archivo hosts: usa localhost (se intercepta)
 # y 127.0.0.1 (no se intercepta). Sale con código 1 si alguna verificación falla.
 #
@@ -9,6 +9,7 @@ cd "$(dirname "$0")" || exit 1
 BIN="${RAYO_BIN:-../target/release/rayo-cache}"
 PX=http://127.0.0.1:3129
 ORIGIN_HTTP=http://127.0.0.1:8080
+L=https://localhost:8443
 
 # En Windows, Git Bash convertiría -subj "/CN=..." en una ruta. Se desactiva solo aquí: exportarlo
 # rompería `curl -o /dev/null`, que necesita esa conversión.
@@ -21,16 +22,24 @@ openssl_literal req -newkey rsa:2048 -nodes -keyout origin.key -out origin.csr -
 printf "subjectAltName=DNS:localhost,IP:127.0.0.1\nbasicConstraints=CA:FALSE\nextendedKeyUsage=serverAuth\n" > ext.cnf
 openssl x509 -req -in origin.csr -CA origin-ca.pem -CAkey origin-ca.key -CAcreateserial -out origin.pem -days 2 -extfile ext.cnf 2>/dev/null
 
-cat > config.e2e.toml <<EOF
-listen = "127.0.0.1:3129"
-data_dir = "./data"
+# Escribe config.<nombre>.toml. Se puede ajustar con LISTEN, CLIENTS, RATE, INTERNAL, BUDGET y DOMAINS.
+write_config() {
+  local listen="${LISTEN:-127.0.0.1:$2}" clients="${CLIENTS:-[\"127.0.0.1/32\", \"::1/128\"]}"
+  local internal="${INTERNAL:-[\"127.0.0.0/8\", \"::1/128\"]}" domains="${DOMAINS:-[\"localhost\"]}"
+  cat > "config.$1.toml" <<EOF
+listen = "$listen"
+allowed_clients = $clients
+rate_limit_per_minute = ${RATE:-0}
+allowed_internal_networks = $internal
+max_buffered_bytes = ${BUDGET:-67108864}
+data_dir = "./data-$1"
 ca_cert = "./ca/rayo-ca.crt"
 ca_key = "./ca/rayo-ca.key"
 max_object_bytes = 1048576
 default_ttl_secs = 3600
 mem_index_entries = 10000
 cache_plain_http = true
-intercept_domains = ["localhost"]
+intercept_domains = $domains
 never_intercept = ["127.0.0.1"]
 strip_query_params = ["fbclid"]
 strip_query_prefixes = ["utm_"]
@@ -38,34 +47,63 @@ store_id = []
 stats_host = "rayo.stats"
 upstream_extra_ca = ["./origin-ca.pem"]
 EOF
+}
 
-rm -rf data
-python3 origin.py & ORIGIN=$!
-"$BIN" config.e2e.toml > proxy.log 2>&1 & PROXY=$!
-trap 'kill $ORIGIN $PROXY 2>/dev/null' EXIT
+PIDS=()
+trap 'kill "${PIDS[@]}" 2>/dev/null' EXIT
+start_proxy() {
+  write_config "$1" "$2"
+  "$BIN" "config.$1.toml" > "$1.log" 2>&1 &
+  PIDS+=($!)
+  for _ in $(seq 1 50); do
+    curl -s --noproxy "" -x "http://127.0.0.1:$2" http://rayo.stats/ >/dev/null && return
+    sleep 0.2
+  done
+}
 
-for _ in $(seq 1 50); do
-  curl -s --noproxy "" -x "$PX" http://rayo.stats/ >/dev/null && break
-  sleep 0.2
-done
+rm -rf ca data-*
+python3 origin.py & PIDS+=($!)
+start_proxy e2e 3129
+CLIENTS='["192.0.2.0/24"]' start_proxy denied 3130
+RATE=5 start_proxy limited 3131
+INTERNAL='[]' start_proxy strict 3132
+DOMAINS='[]' BUDGET=1024 start_proxy tight 3133
 
 FAILS=0
 expect() { # descripción, esperado, obtenido
   if [ "$2" = "$3" ]; then echo "  ok    $1"; else echo "  FALLA $1: esperaba '$2', obtuve '$3'"; FAILS=$((FAILS + 1)); fi
 }
 section() { echo; echo "$1"; }
-curlx() { curl -s --ssl-no-revoke --noproxy "" -x "$PX" --cacert ca/rayo-ca.crt -H "Accept-Encoding: gzip" "$@"; }
+curlx() { curl -s -g --ssl-no-revoke --noproxy "" -x "$PX" --cacert ca/rayo-ca.crt -H "Accept-Encoding: gzip" "$@"; }
 # Devuelve "<estado> <x-rayo-cache>", con "-" si la respuesta no pasó por la caché.
 px() { curlx -o /dev/null -D - "$@" | tr -d '\r' | awk '/^HTTP/{s=$2} tolower($1)=="x-rayo-cache:"{c=$2} END{print s, (c?c:"-")}'; }
 body() { curlx "$@"; }
 metric() { curl -s --noproxy "" -x "$PX" http://rayo.stats/ | python3 -c "import json,sys; print(json.load(sys.stdin).get(sys.argv[1], 'ausente'))" "$1"; }
 sha() { sha256sum | cut -d' ' -f1; }
 # Ruta en disco del objeto cuyo contenido es el que el origen entrega hoy en esa URL.
-object_path() { local h; h=$(curl -s --noproxy "*" "$ORIGIN_HTTP$1" | sha); echo "data/objects/${h:0:2}/$h"; }
+object_path() { local h; h=$(curl -s --noproxy "*" "$ORIGIN_HTTP$1" | sha); echo "data-e2e/objects/${h:0:2}/$h"; }
 # Emisor del certificado que recibe un cliente que conecta a $1 con SNI $2.
-issuer() { echo Q | timeout 10 openssl s_client -proxy 127.0.0.1:3129 -connect "$1" -servername "$2" 2>/dev/null | grep -o -E "Lab Origin CA|Rayo Cache Local CA" | head -1; }
-
-L=https://localhost:8443
+issuer() { echo Q | timeout 10 openssl s_client -proxy "${PX#http://}" -connect "$1" -servername "$2" 2>/dev/null | grep -o -E "Lab Origin CA|Rayo Cache Local CA" | head -1; }
+# Veces que el origen recibió esa ruta, sin la barra inicial: Git Bash la convertiría en una ruta de Windows.
+origin_hits() { curl -s --noproxy "*" "$ORIGIN_HTTP/__hits" | python3 -c "import json,sys; print(json.load(sys.stdin).get('/' + sys.argv[1], 0))" "$1"; }
+# Lanza $1 peticiones simultáneas a $2 y dice cuántas recibieron un 200.
+parallel() {
+  local pids=() i
+  for ((i = 0; i < $1; i++)); do px "$2" > "par.$i" & pids+=($!); done
+  wait "${pids[@]}"
+  cat par.* | grep -c '^200'
+  rm -f par.*
+}
+# Código de salida del proxy con esa configuración (124 = no se negó a arrancar).
+startup_exit() { timeout 8 "$BIN" "config.$1.toml" > "$1.log" 2>&1; echo $?; }
+# ¿Una cadena firmada por la CA para este nombre es válida? La llave de la CA se usa aquí como lo haría un atacante.
+ca_can_sign_for() {
+  openssl_literal req -newkey rsa:2048 -nodes -keyout leaf.key -out leaf.csr -subj "/CN=$1" 2>/dev/null
+  printf "subjectAltName=DNS:%s\n" "$1" > leaf.cnf
+  openssl x509 -req -in leaf.csr -CA ca/rayo-ca.crt -CAkey ca/rayo-ca.key -CAcreateserial -out leaf.pem -days 1 -extfile leaf.cnf 2>/dev/null
+  if openssl verify -CAfile ca/rayo-ca.crt leaf.pem >/dev/null 2>&1; then echo si; else echo no; fi
+  rm -f leaf.key leaf.csr leaf.cnf leaf.pem ca/rayo-ca.srl
+}
 
 section "1. HIT y MISS"
 expect "primera petición HTTPS"              "200 MISS" "$(px $L/static.js)"
@@ -132,19 +170,87 @@ expect "ninguno cuenta además como bypass"      "$before_b" "$(metric bypass)"
 curlx --max-time 2 -o /dev/null -H "Connection: Upgrade" -H "Upgrade: websocket" -H "Sec-WebSocket-Version: 13" \
   -H "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==" http://localhost:8080/ws
 
+section "8. Coalescencia"
+expect "20 clientes simultáneos reciben el objeto" "20" "$(parallel 20 http://localhost:8080/slow)"
+expect "el origen recibe una sola petición"  "1" "$(origin_hits slow)"
+expect "hubo clientes que esperaron"         "si" "$([ "$(metric coalesced)" -gt 0 ] 2>/dev/null && echo si || echo no)"
+start=$(date +%s)
+expect "5 clientes de una URL no cacheable"  "5" "$(parallel 5 http://localhost:8080/slow-private)"
+elapsed=$(($(date +%s) - start))
+expect "no quedan atendidos en fila (${elapsed}s, en fila serían 5s)" "si" "$([ "$elapsed" -lt 5 ] && echo si || echo no)"
+
 req=$(metric requests); sum=0
 for k in hits misses revalidated_304 bypass origin_errors cache_errors; do
   v=$(metric "$k"); [ "$v" = "ausente" ] && v=0; sum=$((sum + v))
 done
 expect "toda petición termina en un solo resultado" "$req" "$sum"
 
-section "Estadísticas finales"
+section "Estadísticas del proxy principal"
 curl -s --noproxy "" -x "$PX" http://rayo.stats/; echo
+
+section "9. Clientes no permitidos"
+PX=http://127.0.0.1:3130
+expect "HTTP plano rechazado"                "403 -" "$(px http://localhost:8080/static.js)"
+expect "CONNECT rechazado"                   "403 -" "$(px $L/static.js)"
+expect "estadísticas rechazadas"             "403 -" "$(px http://rayo.stats/)"
+
+section "10. Límite por IP"
+PX=http://127.0.0.1:3131
+codes=$(for _ in $(seq 1 12); do px http://localhost:8080/static.js; done)
+expect "las primeras peticiones pasan"       "200 MISS" "$(echo "$codes" | head -1)"
+expect "al superar el límite se recibe 429"  "si" "$([ "$(echo "$codes" | grep -c '^429')" -gt 0 ] && echo si || echo no)"
+expect "se indica cuándo reintentar"         "1" "$(curlx -o /dev/null -D - http://localhost:8080/static.js | grep -ci '^retry-after:')"
+
+section "11. Destinos internos"
+PX=http://127.0.0.1:3132
+before=$(metric blocked_destinations)
+expect "metadatos de la nube"                "403 -" "$(px http://169.254.169.254/latest/meta-data/)"
+expect "red privada"                         "403 -" "$(px http://10.0.0.1/)"
+expect "este equipo por IPv4"                "403 -" "$(px $ORIGIN_HTTP/static.js)"
+expect "este equipo por IPv6"                "403 -" "$(px "http://[::1]:8080/static.js")"
+expect "túnel a IP interna"                  "403 -" "$(px https://127.0.0.1:8443/static.js)"
+expect "túnel a nombre interno"              "403 -" "$(px $L/static.js)"
+expect "nombre que resuelve a IP interna"    "502 -" "$(px http://localhost:8080/static.js)"
+expect "los 7 intentos quedan contados"      "$((before + 7))" "$(metric blocked_destinations)"
+expect "IP escrita como número decimal"      "403 -" "$(px http://2130706433:8080/static.js)"
+PX=http://127.0.0.1:3129
+expect "una excepción configurada sí pasa"   "200 -" "$(px $ORIGIN_HTTP/static.js)"
+
+section "12. Túneles con IP fijada y memoria agotada"
+PX=http://127.0.0.1:3133
+expect "un túnel a un nombre sigue funcionando" "Lab Origin CA" "$(issuer localhost:8443 localhost)"
+size=$(curl -s --noproxy "*" "$ORIGIN_HTTP/static.js" | wc -c | tr -d ' ')
+expect "sin memoria, el objeto llega entero" "$size" "$(curlx -o /dev/null -w '%{size_download}' http://localhost:8080/static.js)"
+expect "y se atiende sin caché"              "200 -" "$(px http://localhost:8080/static.js)"
+expect "no se guardó nada"                   "0" "$(metric stored_new_objects)"
+expect "queda contado"                       "si" "$([ "$(metric over_budget)" -gt 0 ] 2>/dev/null && echo si || echo no)"
+
+section "13. La CA está limitada y su llave protegida"
+expect "firma para un dominio configurado"   "si" "$(ca_can_sign_for localhost)"
+expect "firma para sus subdominios"          "si" "$(ca_can_sign_for sub.localhost)"
+expect "no sirve para otros dominios"        "no" "$(ca_can_sign_for banco.invalid)"
+expect "no puede crear otras CAs"            "1" "$(openssl x509 -in ca/rayo-ca.crt -noout -ext basicConstraints 2>/dev/null | grep -c 'pathlen:0')"
+if command -v icacls >/dev/null; then
+  acl=$(icacls ca/rayo-ca.key)
+  expect "solo un usuario puede leer la llave" "1" "$(echo "$acl" | grep -c ':(')"
+  expect "con acceso de su dueño"            "1" "$(echo "$acl" | grep -c "${USERNAME}:(F)")"
+else
+  expect "solo el dueño puede leer la llave" "600" "$(stat -c %a ca/rayo-ca.key)"
+fi
+
+section "14. Se niega a arrancar con una configuración insegura"
+LISTEN=0.0.0.0:3140 write_config lan-sin-clientes 3140
+expect "abierto a la red sin clientes"       "1" "$(startup_exit lan-sin-clientes)"
+LISTEN=0.0.0.0:3141 CLIENTS='["0.0.0.0/0"]' write_config todo-internet 3141
+expect "abierto a todo Internet"             "1" "$(startup_exit todo-internet)"
+DOMAINS='["otro.invalid"]' write_config fuera-de-la-ca 3142
+expect "dominio que la CA no puede firmar"   "1" "$(startup_exit fuera-de-la-ca)"
+expect "y explica cómo resolverlo"           "1" "$(grep -c 'no puede firmar' fuera-de-la-ca.log)"
 
 echo
 if [ "$FAILS" -eq 0 ]; then
   echo "TODO OK"
 else
-  echo "$FAILS verificación(es) fallaron. Log del proxy: e2e/proxy.log"
+  echo "$FAILS verificación(es) fallaron. Logs de los proxies: e2e/*.log"
   exit 1
 fi

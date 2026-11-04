@@ -39,6 +39,11 @@ Reglas de seguridad incluidas:
 - Cada objeto se verifica contra su SHA-256 antes de servirse; si el disco fue alterado, se borra y se vuelve a descargar.
 - Escrituras atómicas (temporal + rename): un corte de luz no deja objetos a medias.
 - Objetos más grandes que `max_object_bytes` pasan en streaming sin cargar todo en memoria.
+- Solo los clientes de `allowed_clients` pueden usar el proxy, con un máximo de `rate_limit_per_minute` peticiones por IP.
+- Los clientes no alcanzan este equipo ni la red local a través del proxy, salvo las redes de `allowed_internal_networks`.
+- La CA solo puede firmar para los dominios configurados al generarla, y su llave solo la puede leer el usuario que ejecuta el proxy.
+- Si un objeto no cabe en `max_buffered_bytes`, se atiende en streaming, sin caché.
+- Si varios clientes piden a la vez un objeto que no está, solo uno va al origen y los demás esperan hasta `coalesce_wait_secs`.
 
 ## Compilar
 
@@ -64,25 +69,41 @@ cargo build --release
 
 `RUST_LOG=rayo_cache=debug` muestra cada decisión de intercepción.
 
+### Usarlo en una red compartida
+
+Por defecto solo acepta conexiones de este mismo equipo. Para abrirlo a tu red:
+
+1. **Define `intercept_domains` antes de generar la CA.** La CA queda limitada a esa lista. Para agregar un dominio fuera de ella hay que generar otra CA y reinstalarla en todos los dispositivos. Si el dominio no está cubierto, el proxy no arranca y lo explica.
+2. **Abre el acceso** en `config.toml`, con la subred real de tu red:
+   ```toml
+   listen = "0.0.0.0:3128"
+   allowed_clients = ["192.168.1.0/24"]
+   ```
+   El proxy no arranca si `listen` no es local y `allowed_clients` solo permite este equipo, ni si incluye a todo Internet (`0.0.0.0/0`). La IP no identifica a una persona: cualquiera dentro de la subred puede usarlo.
+3. **Si necesitan llegar a una intranet** a través del proxy, agrega sus redes a `allowed_internal_networks`. Todo lo interno está bloqueado por defecto.
+4. **Si generaste una CA con una versión anterior,** el proxy avisa al arrancar de que no tiene límites. Bórrala de cada dispositivo (en Windows: `certutil -delstore ROOT "Rayo Cache Local CA"`), borra `ca/`, arranca para generar otra y reinstálala.
+
+Un cliente permitido todavía puede abrir túneles a cualquier puerto de una IP pública.
+
 ### Cómo leer las estadísticas
 
 - Sin peticiones en curso, `requests` = `hits` + `misses` + `revalidated_304` + `bypass` + `origin_errors` + `cache_errors`.
 - `byte_hit_ratio` = `bytes_from_cache` / (`bytes_from_cache` + `bytes_from_origin` + `bytes_bypass`).
 - El tráfico en passthrough no entra en ese ratio: Hudsucker no expone sus bytes. Solo se cuentan las conexiones, en `tls_passthrough`.
+- `denied_clients`, `rate_limited` y `blocked_destinations` cuentan rechazos. Un rechazo no suma en `requests`, salvo un nombre que resuelve a una IP interna, que además cuenta como `origin_errors`.
+- `over_budget` cuenta las veces que no hubo memoria disponible y `coalesced` las peticiones que esperaron a otra igual.
 
 ## Probar
 
 ```bash
-cargo test                       # claves, reglas de caché, integridad del almacén y contadores
+cargo test                       # reglas de caché, acceso, CA, memoria, coalescencia y contadores
 cargo build --release
 ./e2e/run.sh                     # origen de laboratorio + proxy; termina con error si algo falla
 ```
 
-El e2e requiere bash, `openssl`, `python3` y `curl`, y usa los puertos 3129, 8080 y 8443. En Windows se ejecuta desde Git Bash.
+El e2e requiere bash, `openssl`, `python3` y `curl`, y usa los puertos 3129-3133, 8080 y 8443. En Windows se ejecuta desde Git Bash.
 
-Resultado verificado en el entorno de desarrollo: HIT/MISS correctos, deduplicación entre URLs y entre
-HTTP/HTTPS, revalidación 304, persistencia tras reinicio (HIT desde disco) y 400 peticiones concurrentes
-con 1 sola descarga al origen (byte hit ratio 99.7 %).
+El e2e verifica, entre otras cosas, que 20 peticiones simultáneas a un objeto nuevo causan 1 sola descarga al origen. No prueba clientes en otras máquinas ni navegadores: conviene probar la CA limitada en los navegadores de tu red antes de repartirla.
 
 ## Uso responsable
 
@@ -93,10 +114,9 @@ fallarán si se interceptan: van en `never_intercept`.
 
 ## Mejoras siguientes (en orden de impacto)
 
-1. **Coalescencia de peticiones**: si 40 clientes piden el mismo objeto que aún no está, que solo uno vaya al origen.
-2. **Soporte de `Range`** para segmentos de video y descargas reanudables (servir rebanadas del objeto completo).
-3. **Recolector de disco LRU** con un tope `max_disk_bytes` (hoy el disco crece sin límite).
-4. **Modo transparente**: `iptables -t nat ... REDIRECT` hacia el proxy; el filtro por SNI ya está implementado. Bloquear UDP/443 para que el tráfico no se escape por QUIC.
-5. **Prefetch nocturno predictivo** a partir de los logs (qué se repite y cuándo).
-6. **Métricas Prometheus** y panel de ahorro.
-7. **Modo cooperativo**: manifiestos firmados por sitios aliados para cachear contenido semidinámico sin CA local.
+1. **Soporte de `Range`** para segmentos de video y descargas reanudables (servir rebanadas del objeto completo).
+2. **Recolector de disco LRU** con un tope `max_disk_bytes` (hoy el disco crece sin límite).
+3. **Modo transparente**: `iptables -t nat ... REDIRECT` hacia el proxy; el filtro por SNI ya está implementado. Bloquear UDP/443 para que el tráfico no se escape por QUIC.
+4. **Prefetch nocturno predictivo** a partir de los logs (qué se repite y cuándo).
+5. **Métricas Prometheus** y panel de ahorro.
+6. **Modo cooperativo**: manifiestos firmados por sitios aliados para cachear contenido semidinámico sin CA local.
