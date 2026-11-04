@@ -5,13 +5,15 @@
 //!
 //! El índice caliente vive en memoria (moka); el disco persiste entre reinicios.
 
+use crate::stats::Stats;
 use bytes::Bytes;
 use moka::future::Cache;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::Ordering::Relaxed;
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Meta {
@@ -35,6 +37,7 @@ impl Meta {
 pub struct Store {
     root: PathBuf,
     index: Cache<String, Arc<Meta>>,
+    stats: Arc<Stats>,
 }
 
 pub enum PutOutcome {
@@ -43,12 +46,13 @@ pub enum PutOutcome {
 }
 
 impl Store {
-    pub async fn open(root: &Path, mem_entries: u64) -> anyhow::Result<Self> {
+    pub async fn open(root: &Path, mem_entries: u64, stats: Arc<Stats>) -> anyhow::Result<Self> {
         tokio::fs::create_dir_all(root.join("objects")).await?;
         tokio::fs::create_dir_all(root.join("meta")).await?;
         Ok(Self {
             root: root.to_path_buf(),
             index: Cache::builder().max_capacity(mem_entries).build(),
+            stats,
         })
     }
 
@@ -77,6 +81,7 @@ impl Store {
         // Verificación de integridad: si el archivo fue alterado, no se sirve y se borra,
         // para que `put` lo escriba de nuevo en vez de tomarlo por un duplicado válido.
         if hex::encode(Sha256::digest(&bytes)) != meta.object {
+            Stats::inc(&self.stats.corrupt_objects);
             tracing::error!("objeto corrupto {}, se descarta", meta.object);
             if let Err(e) = tokio::fs::remove_file(&path).await {
                 tracing::warn!(error = %e, "no se pudo borrar el objeto corrupto {}", meta.object);
@@ -134,6 +139,50 @@ pub fn now() -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
 }
 
+/// Bytes y cantidad de archivos bajo una carpeta. Lo que no se pueda leer no se cuenta.
+fn directory_usage(dir: &Path) -> (u64, u64) {
+    let (mut bytes, mut files) = (0, 0);
+    let mut pending = vec![dir.to_path_buf()];
+    while let Some(current) = pending.pop() {
+        let Ok(entries) = std::fs::read_dir(&current) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let Ok(metadata) = entry.metadata() else {
+                continue;
+            };
+            if metadata.is_dir() {
+                pending.push(entry.path());
+            } else {
+                bytes += metadata.len();
+                files += 1;
+            }
+        }
+    }
+    (bytes, files)
+}
+
+/// Mide el disco en segundo plano: recorrer los archivos es demasiado lento para hacerlo al pedir métricas.
+pub fn watch_disk(root: PathBuf, stats: Arc<Stats>, every: Duration) {
+    tokio::spawn(async move {
+        let mut tick = tokio::time::interval(every);
+        loop {
+            tick.tick().await;
+            let dir = root.clone();
+            let measured = tokio::task::spawn_blocking(move || {
+                let (object_bytes, objects) = directory_usage(&dir.join("objects"));
+                let (meta_bytes, _) = directory_usage(&dir.join("meta"));
+                (object_bytes + meta_bytes, objects)
+            })
+            .await;
+            if let Ok((bytes, objects)) = measured {
+                stats.disk_used_bytes.store(bytes, Relaxed);
+                stats.disk_objects.store(objects, Relaxed);
+            }
+        }
+    });
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -155,18 +204,24 @@ mod tests {
     #[tokio::test]
     async fn objeto_corrupto_se_borra_y_se_repara() {
         let root = std::env::temp_dir().join(format!("rayo-store-test-{}", std::process::id()));
-        let store = Store::open(&root, 10).await.unwrap();
+        let stats = Arc::new(Stats::default());
+        let store = Store::open(&root, 10, stats.clone()).await.unwrap();
         let body = Bytes::from_static(b"contenido");
         let key = Store::key_hash("k");
 
         assert!(matches!(store.put(&key, meta(), &body).await.unwrap(), PutOutcome::New));
         let saved = store.get(&key).await.unwrap();
         assert_eq!(store.read_object(&saved).await.unwrap(), body);
+        assert_eq!(stats.corrupt_objects.load(Relaxed), 0);
+
+        let (bytes, objects) = directory_usage(&root.join("objects"));
+        assert_eq!((bytes, objects), (body.len() as u64, 1));
 
         let path = store.sharded("objects", &saved.object, "");
         tokio::fs::write(&path, b"alterado").await.unwrap();
         assert!(store.read_object(&saved).await.is_none());
         assert!(!path.exists());
+        assert_eq!(stats.corrupt_objects.load(Relaxed), 1);
 
         assert!(matches!(store.put(&key, meta(), &body).await.unwrap(), PutOutcome::New));
         assert_eq!(store.read_object(&saved).await.unwrap(), body);

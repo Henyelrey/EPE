@@ -1107,6 +1107,7 @@ dependencies = [
  "hex",
  "http-body-util",
  "hudsucker",
+ "hyper",
  "hyper-rustls",
  "hyper-util",
  "moka",

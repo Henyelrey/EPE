@@ -5,6 +5,7 @@
 //! llave se filtra, el daño queda limitado a esos dominios y no a todas las webs de cada dispositivo.
 
 use crate::config::matches_suffix;
+use crate::secure::{restrict_to_owner, write_private};
 use anyhow::{bail, Context};
 use hudsucker::{certificate_authority::RcgenAuthority, rustls::crypto::aws_lc_rs};
 use rcgen::{
@@ -24,7 +25,7 @@ pub fn load_or_generate(cert_path: &Path, key_path: &Path, intercept_domains: &[
         generate(cert_path, key_path, intercept_domains)?;
     }
     // También protege llaves generadas por versiones anteriores.
-    if let Err(e) = protect_key(key_path) {
+    if let Err(e) = restrict_to_owner(key_path) {
         tracing::warn!("no se pudo restringir el acceso a {}: {e:#}", key_path.display());
     }
     let cert_pem = std::fs::read_to_string(cert_path).context("leyendo certificado de la CA")?;
@@ -103,13 +104,7 @@ fn generate(cert_path: &Path, key_path: &Path, intercept_domains: &[String]) -> 
     let key = KeyPair::generate()?;
     let cert = params.self_signed(&key)?;
 
-    // El archivo se protege estando vacío: la llave nunca existe en disco con permisos abiertos.
-    std::fs::File::create(key_path).context("creando la llave de la CA")?;
-    if let Err(e) = protect_key(key_path) {
-        let _ = std::fs::remove_file(key_path);
-        return Err(e.context("no se pudo restringir el acceso a la llave de la CA"));
-    }
-    std::fs::write(key_path, key.serialize_pem())?;
+    write_private(key_path, key.serialize_pem().as_bytes()).context("guardando la llave de la CA")?;
     std::fs::write(cert_path, cert.pem())?;
 
     tracing::warn!(
@@ -154,33 +149,6 @@ fn uncovered_domains(domains: &[String], permitted: &[String]) -> Vec<String> {
         })
         .cloned()
         .collect()
-}
-
-#[cfg(unix)]
-fn protect_key(path: &Path) -> anyhow::Result<()> {
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
-    Ok(())
-}
-
-#[cfg(windows)]
-fn protect_key(path: &Path) -> anyhow::Result<()> {
-    let user = std::env::var("USERNAME").context("no se conoce el usuario actual")?;
-    let account = match std::env::var("USERDOMAIN") {
-        Ok(domain) => format!("{domain}\\{user}"),
-        Err(_) => user,
-    };
-    // Quita los permisos heredados y deja acceso solo a la cuenta que ejecuta el proxy.
-    let output = std::process::Command::new("icacls")
-        .arg(path)
-        .args(["/inheritance:r", "/grant:r"])
-        .arg(format!("{account}:F"))
-        .output()
-        .context("ejecutando icacls")?;
-    if !output.status.success() {
-        bail!("icacls terminó con error: {}", String::from_utf8_lossy(&output.stderr).trim());
-    }
-    Ok(())
 }
 
 #[cfg(test)]

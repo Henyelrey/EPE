@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Prueba de punta a punta: origen de laboratorio (HTTP :8080 / HTTPS :8443) + varios proxies en :3129-3135.
+# Prueba de punta a punta: origen de laboratorio (HTTP :8080 / HTTPS :8443) + varios proxies en :3129-3137 y :3139.
 # Requiere: openssl, python3 y curl. No hace falta tocar el archivo hosts: usa localhost (se intercepta)
 # y 127.0.0.1 (no se intercepta). Sale con código 1 si alguna verificación falla.
 #
@@ -22,7 +22,8 @@ openssl_literal req -newkey rsa:2048 -nodes -keyout origin.key -out origin.csr -
 printf "subjectAltName=DNS:localhost,IP:127.0.0.1\nbasicConstraints=CA:FALSE\nextendedKeyUsage=serverAuth\n" > ext.cnf
 openssl x509 -req -in origin.csr -CA origin-ca.pem -CAkey origin-ca.key -CAcreateserial -out origin.pem -days 2 -extfile ext.cnf 2>/dev/null
 
-# Escribe config.<nombre>.toml. Se puede ajustar con LISTEN, CLIENTS, RATE, INTERNAL, BUDGET, DOMAINS y CONTACT.
+# Escribe config.<nombre>.toml. Se puede ajustar con LISTEN, CLIENTS, RATE, INTERNAL, BUDGET, DOMAINS, CONTACT,
+# ADMIN, ADMIN_TOKEN, LOG_ENABLED, LOG_DAYS y LOG_IP.
 write_config() {
   local listen="${LISTEN:-127.0.0.1:$2}" clients="${CLIENTS:-[\"127.0.0.1/32\", \"::1/128\"]}"
   local internal="${INTERNAL:-[\"127.0.0.0/8\", \"::1/128\"]}" domains="${DOMAINS:-[\"localhost\"]}"
@@ -48,6 +49,13 @@ strip_query_prefixes = ["utm_"]
 store_id = []
 stats_host = "rayo.stats"
 upstream_extra_ca = ["./origin-ca.pem"]
+admin_listen = "${ADMIN:-}"
+admin_token_file = "${ADMIN_TOKEN:-./ca/admin.token}"
+disk_scan_interval_secs = 1
+access_log_enabled = ${LOG_ENABLED:-false}
+access_log_dir = "./logs-$1"
+access_log_retention_days = ${LOG_DAYS:-7}
+access_log_client_ip = "${LOG_IP:-pseudonym}"
 EOF
 }
 
@@ -63,7 +71,11 @@ start_proxy() {
   done
 }
 
-rm -rf ca data-*
+rm -rf ca data-* logs-*
+# Un log que ya venció y un archivo ajeno, para comprobar que la retención borra solo lo que debe.
+mkdir -p logs-observed
+echo '{}' > logs-observed/access-2020-01-01.jsonl
+echo 'notas' > logs-observed/notas.txt
 python3 origin.py & PIDS+=($!)
 start_proxy e2e 3129
 CLIENTS='["192.0.2.0/24"]' start_proxy denied 3130
@@ -72,6 +84,8 @@ INTERNAL='[]' start_proxy strict 3132
 DOMAINS='[]' BUDGET=1024 start_proxy tight 3133
 RUST_LOG=rayo_cache=debug CONTACT='<script>alert(1)</script>' start_proxy detailed 3134
 RUST_LOG=info start_proxy verbose 3135
+ADMIN=127.0.0.1:3137 LOG_ENABLED=true start_proxy observed 3136
+LOG_ENABLED=true LOG_IP=none LOG_DAYS=3 start_proxy anon 3139
 
 FAILS=0
 expect() { # descripción, esperado, obtenido
@@ -285,6 +299,129 @@ page=$(body http://rayo.aviso/)
 expect "avisa si el registro detallado está activo" "si" "$(has "$page" 'Registro detallado: activado')"
 expect "escapa los datos de la configuración" "no" "$(has "$page" '<script>')"
 expect "y los muestra como texto"            "si" "$(has "$page" '&lt;script&gt;')"
+
+section "16. Puerto de administración y métricas"
+PX=http://127.0.0.1:3136
+ADMIN_URL=http://127.0.0.1:3137
+TOKEN=$(cat ca/admin.token)
+admin_status() { curl -s --noproxy "*" -o /dev/null -w '%{http_code}' "$@"; }
+# Valor de una serie de /metrics, tal como la escribe el proxy.
+prom() { curl -s --noproxy "*" -H "Authorization: Bearer $TOKEN" "$ADMIN_URL/metrics" | tr -d '\r' | awk -v k="$1" 'index($0, k " ") == 1 {print $2}'; }
+over() { if python3 -c "import sys; sys.exit(0 if float(sys.argv[1]) > float(sys.argv[2]) else 1)" "${1:-0}" "$2"; then echo si; else echo no; fi; }
+expect "el token es largo"                   "64" "${#TOKEN}"
+expect "sin token, /healthz responde"        "200" "$(admin_status $ADMIN_URL/healthz)"
+expect "sin token, /metrics se rechaza"      "401" "$(admin_status $ADMIN_URL/metrics)"
+expect "con un token incorrecto, también"    "401" "$(admin_status -H 'Authorization: Bearer incorrecto' $ADMIN_URL/metrics)"
+expect "con el token, responde"              "200" "$(admin_status -H "Authorization: Bearer $TOKEN" $ADMIN_URL/metrics)"
+expect "otras rutas no existen"              "404" "$(admin_status -H "Authorization: Bearer $TOKEN" $ADMIN_URL/)"
+expect "a través del proxy, el token se sigue exigiendo" "401 -" "$(px $ADMIN_URL/metrics)"
+PX=http://127.0.0.1:3132
+expect "con los destinos internos bloqueados, ni se llega" "403 -" "$(px $ADMIN_URL/metrics)"
+PX=http://127.0.0.1:3136
+if command -v icacls >/dev/null; then
+  expect "solo un usuario puede leer el token" "1" "$(icacls ca/admin.token | grep -c ':(')"
+else
+  expect "solo el dueño puede leer el token" "600" "$(stat -c %a ca/admin.token)"
+fi
+
+expect "primera petición"                    "200 MISS" "$(px "$L/static.js?token=SECRETO-QUERY")"
+expect "segunda petición"                    "200 HIT"  "$(px "$L/static.js?token=SECRETO-QUERY")"
+expect "dinámico"                            "200 MISS" "$(px $L/dyn)"
+expect "dinámico revalidado"                 "200 REVALIDATED" "$(px $L/dyn)"
+expect "con cookie y credenciales"           "200 -" "$(px -H 'Cookie: sid=SECRETO-COOKIE' -H 'Authorization: Bearer SECRETO-AUTH' "$L/private?clave=SECRETO-QUERY")"
+curlx -o /dev/null -X POST -d 'SECRETO-CUERPO' "$L/perfil?clave=SECRETO-QUERY"
+expect "origen caído"                        "502 -" "$(px "http://localhost:1/x?token=SECRETO-QUERY")"
+expect "destino interno"                     "403 -" "$(px "http://169.254.169.254/latest?token=SECRETO-QUERY")"
+expect "objeto grande llega entero"          "2500000" "$(curlx -o /dev/null -w '%{size_download}' $L/big)"
+expect "túnel en passthrough"                "Lab Origin CA" "$(issuer 127.0.0.1:8443 127.0.0.1.nip.invalid)"
+expect "SNI distinto en passthrough"         "Lab Origin CA" "$(issuer localhost:8443 otro.invalid)"
+
+expect "cuenta los HIT"                      "1" "$(prom 'rayo_results_total{result="hit"}')"
+expect "cuenta las revalidaciones"           "1" "$(prom 'rayo_results_total{result="revalidated"}')"
+expect "mide la latencia de los HIT"         "1" "$(prom 'rayo_request_duration_seconds_count{result="hit"}')"
+expect "y la de los errores"                 "1" "$(prom 'rayo_request_duration_seconds_count{result="error"}')"
+expect "acumula el tiempo"                   "si" "$(over "$(prom 'rayo_request_duration_seconds_sum{result="miss"}')" 0)"
+expect "ratio de peticiones"                 "si" "$(over "$(prom rayo_request_hit_ratio)" 0)"
+expect "los túneles quedan contados"         "2" "$(prom 'rayo_tls_connections_total{mode="passthrough"}')"
+expect "el formato es el de Prometheus"      "0" "$(curl -s --noproxy "*" -H "Authorization: Bearer $TOKEN" "$ADMIN_URL/metrics" | tr -d '\r' | grep -cvE '^(# (HELP|TYPE) rayo_|rayo_[a-z_]+(\{[a-z]+="[^"]*"(,[a-z]+="[^"]*")*\})? [0-9.e+-]+$)')"
+sleep 1.5
+expect "mide el disco"                       "si" "$(over "$(prom rayo_disk_used_bytes)" 0)"
+expect "cuenta los objetos"                  "si" "$(over "$(prom rayo_disk_objects)" 0)"
+
+h=$(curl -s --noproxy "*" "$ORIGIN_HTTP/static.js" | sha)
+printf 'alterado' > "data-observed/objects/${h:0:2}/$h"
+expect "una copia corrupta se vuelve a pedir" "200 MISS" "$(px "$L/static.js?token=SECRETO-QUERY")"
+expect "cuenta los objetos corruptos"        "1" "$(prom rayo_corrupt_objects_total)"
+h=$(curl -s --noproxy "*" "$ORIGIN_HTTP/reflect" | sha)
+rm -rf "data-observed/objects/${h:0:2}"
+printf 'estorbo' > "data-observed/objects/${h:0:2}"
+expect "un fallo de escritura no afecta al cliente" "200 MISS" "$(px $L/reflect)"
+expect "y queda contado"                     "1" "$(prom rayo_store_write_errors_total)"
+rm -f "data-observed/objects/${h:0:2}"
+
+expect "rayo.stats no publica el uso de disco"   "ausente" "$(metric disk_used_bytes)"
+expect "ni el tiempo encendido"                  "ausente" "$(metric uptime_secs)"
+expect "el token no aparece en el registro"      "0" "$(grep -c "$TOKEN" observed.log)"
+
+section "17. Log de acceso"
+sleep 0.5
+# Cuántas líneas del log cumplen una expresión de Python sobre `l`. No lleva barras: Git Bash las convertiría.
+log_count() {
+  python3 -c 'import glob,json,sys; rows=[json.loads(x) for f in glob.glob("logs-"+sys.argv[1]+"/access-*.jsonl") if "2020-01-01" not in f for x in open(f,encoding="utf-8")]; print(sum(1 for l in rows if eval(sys.argv[2])))' "$1" "$2"
+}
+log_text() { cat logs-observed/access-*.jsonl; }
+LOG_FILE=$(ls logs-observed/access-*.jsonl | grep -v 2020-01-01 | head -1)
+expect "un archivo por día, con el formato acordado" "si" "$([ -n "$LOG_FILE" ] && echo si || echo no)"
+expect "cada línea es JSON válido"           "$(wc -l < "$LOG_FILE" | tr -d ' ')" "$(log_count observed True)"
+expect "registra los MISS, también el que repara la copia" "2" "$(log_count observed 'l["result"]=="miss" and l["host"]=="localhost" and "static.js" in (l["path"] or "") and l["status"]==200 and l["bytes"]>0 and l["scheme"]=="https" and l["method"]=="GET" and l["port"]==8443')"
+expect "los HIT"                             "1" "$(log_count observed 'l["result"]=="hit" and "static.js" in (l["path"] or "")')"
+expect "las revalidaciones"                  "1" "$(log_count observed 'l["result"]=="revalidated" and "dyn" in (l["path"] or "")')"
+expect "los errores del origen"              "1" "$(log_count observed 'l["result"]=="origin_error" and l["status"]==502 and l["bytes"] is None')"
+expect "los destinos bloqueados"             "1" "$(log_count observed 'l["result"]=="blocked" and l["host"]=="169.254.169.254"')"
+expect "los bytes reales de un bypass en streaming" "1" "$(log_count observed 'l["result"]=="bypass" and l["bytes"]==2500000')"
+expect "los túneles, con su puerto"          "1" "$(log_count observed 'l["result"]=="tunnel" and l["method"]=="CONNECT" and l["port"]==8443 and l["bytes"] is None')"
+expect "y los que se deciden por el SNI"     "1" "$(log_count observed 'l["result"]=="tunnel" and l["host"]=="otro.invalid"')"
+expect "no registra las rutas de un bypass"  "0" "$(log_count observed 'l["result"]=="bypass" and l["path"] is not None')"
+expect "no registra las visitas a rayo.stats y rayo.aviso" "0" "$(log_count observed 'l["host"] in ("rayo.stats","rayo.aviso")')"
+expect "toda línea tiene un seudónimo de 16 caracteres" "0" "$(log_count observed 'len(l["client"])!=16')"
+expect "el mismo cliente tiene el mismo seudónimo" "1" "$(python3 -c 'import json,sys; print(len({json.loads(x)["client"] for x in open(sys.argv[1],encoding="utf-8")}))' "$LOG_FILE")"
+expect "no contiene parámetros"              "0" "$(log_text | grep -c 'SECRETO-QUERY')"
+expect "ni cookies"                          "0" "$(log_text | grep -c 'SECRETO-COOKIE')"
+expect "ni credenciales"                     "0" "$(log_text | grep -c 'SECRETO-AUTH')"
+expect "ni cuerpos"                          "0" "$(log_text | grep -c 'SECRETO-CUERPO')"
+expect "ni la IP del cliente"                "0" "$(log_count observed 'l["client"]=="127.0.0.1"')"
+expect "el registro del proxy tampoco tiene parámetros" "0" "$(grep -c 'SECRETO' observed.log)"
+if command -v icacls >/dev/null; then
+  expect "solo un usuario puede leer el log" "1" "$(icacls "$LOG_FILE" | grep -c ':(')"
+else
+  expect "solo el dueño puede leer el log"   "600" "$(stat -c %a "$LOG_FILE")"
+fi
+expect "borra los logs vencidos"             "no" "$([ -e logs-observed/access-2020-01-01.jsonl ] && echo si || echo no)"
+expect "y no toca otros archivos"            "si" "$([ -e logs-observed/notas.txt ] && echo si || echo no)"
+page=$(body http://rayo.aviso/)
+expect "el aviso indica que está activo"     "si" "$(has "$page" 'Registro de acceso: activado')"
+expect "y explica lo que permite el seudónimo" "si" "$(has "$page" 'qué dominios visitó un mismo dispositivo')"
+expect "un log apagado no crea nada"         "no" "$([ -e logs-e2e ] && echo si || echo no)"
+PX=http://127.0.0.1:3129
+page=$(body http://rayo.aviso/)
+expect "y el aviso dice que está desactivado" "si" "$(has "$page" 'Registro de acceso: desactivado')"
+PX=http://127.0.0.1:3139
+px http://localhost:8080/static.js >/dev/null
+sleep 0.5
+expect "en modo anónimo se registra la petición" "1" "$(log_count anon 'l["result"]=="miss"')"
+expect "sin nada que distinga al cliente"    "0" "$(log_count anon 'l["client"] is not None')"
+page=$(body http://rayo.aviso/)
+expect "y el aviso lo dice, con su retención" "si" "$(has "$page" 'Se borra a los 3 días')"
+
+section "18. Se niega a arrancar si no puede cumplir lo configurado"
+LOG_ENABLED=true LOG_DAYS=0 write_config sin-retencion 3143
+expect "log sin días de retención"           "1" "$(startup_exit sin-retencion)"
+ADMIN=127.0.0.1:3137 write_config admin-ocupado 3144
+expect "puerto de administración ocupado"    "1" "$(startup_exit admin-ocupado)"
+printf 'corto' > debil.token
+ADMIN=127.0.0.1:3145 ADMIN_TOKEN=./debil.token write_config token-debil 3145
+expect "token demasiado corto"               "1" "$(startup_exit token-debil)"
+rm -f debil.token
 
 echo
 if [ "$FAILS" -eq 0 ]; then

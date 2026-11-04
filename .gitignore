@@ -1,8 +1,11 @@
 target/
 data/
 ca/
+logs/
 config.toml
 e2e/data-*/
+e2e/logs*/
+e2e/*.token
 e2e/ca/
 e2e/*.key
 e2e/*.pem

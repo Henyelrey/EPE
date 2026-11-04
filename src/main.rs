@@ -5,6 +5,8 @@
 //! en el almacén de confianza de TUS dispositivos.
 
 mod access;
+mod access_log;
+mod admin;
 mod ca;
 mod coalesce;
 mod config;
@@ -12,13 +14,14 @@ mod handler;
 mod memory;
 mod notice;
 mod policy;
+mod secure;
 mod stats;
 mod store;
 mod upstream;
 
 use handler::{CacheHandler, Shared};
 use hudsucker::Proxy;
-use std::{net::SocketAddr, path::PathBuf, sync::Arc};
+use std::{net::SocketAddr, path::PathBuf, sync::Arc, time::Duration};
 use tracing_subscriber::EnvFilter;
 
 #[tokio::main]
@@ -36,7 +39,7 @@ async fn main() -> anyhow::Result<()> {
     let stats = Arc::new(stats::Stats::default());
 
     let ca = ca::load_or_generate(&cfg.ca_cert, &cfg.ca_key, &cfg.intercept_domains)?;
-    let store = store::Store::open(&cfg.data_dir, cfg.mem_index_entries).await?;
+    let store = store::Store::open(&cfg.data_dir, cfg.mem_index_entries, stats.clone()).await?;
     let normalizer = policy::KeyNormalizer::new(&cfg)?;
     let connector = upstream::connector(&cfg.upstream_extra_ca, destinations.clone(), stats.clone())?;
 
@@ -56,10 +59,21 @@ async fn main() -> anyhow::Result<()> {
     if !addr.ip().is_loopback() && cfg.operator_contact.trim().is_empty() {
         tracing::warn!("operator_contact está vacío: el aviso no dirá a quién acudir. Complétalo en una red compartida.");
     }
+    if cfg.access_log_enabled {
+        tracing::info!(
+            "log de acceso activo en {}, se conserva {} día(s). El aviso a los usuarios lo indica.",
+            cfg.access_log_dir.display(),
+            cfg.access_log_retention_days
+        );
+    }
+
+    let access_log = access_log::AccessLog::start(&cfg, stats.clone())?;
+    admin::start(&cfg, stats.clone()).await?;
+    store::watch_disk(cfg.data_dir.clone(), stats.clone(), Duration::from_secs(cfg.disk_scan_interval_secs.max(1)));
 
     let memory = memory::MemoryBudget::new(cfg.max_buffered_bytes);
     let flights = coalesce::Flights::new(cfg.coalesce_wait_secs);
-    let shared = Arc::new(Shared { cfg, store, stats, normalizer, clients, destinations, memory, flights, notice });
+    let shared = Arc::new(Shared { cfg, store, stats, normalizer, clients, destinations, memory, flights, access_log, notice });
 
     let proxy = Proxy::builder()
         .with_addr(addr)

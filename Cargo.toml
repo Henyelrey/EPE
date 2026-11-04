@@ -10,6 +10,7 @@ hudsucker = { version = "0.25", features = ["rcgen-ca", "rustls-client", "decode
 rcgen = "0.14"
 tokio = { version = "1", features = ["full"] }
 http-body-util = "0.1"
+hyper = { version = "1", features = ["http1", "server"] }
 bytes = "1"
 moka = { version = "0.12", features = ["future"] }
 sha2 = "0.10"

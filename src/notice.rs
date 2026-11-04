@@ -5,7 +5,7 @@
 //! registro nuevo, hay que actualizar la sección "Qué se guarda" y también docs/AVISO.md.
 
 use crate::ca::CaSummary;
-use crate::config::Config;
+use crate::config::{ClientIpMode, Config};
 
 fn escape(text: &str) -> String {
     text.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('"', "&quot;").replace('\'', "&#39;")
@@ -39,6 +39,23 @@ pub fn render(cfg: &Config, ca: &CaSummary, detailed_logs: bool) -> String {
     } else {
         "Registro detallado: desactivado. Quien administra el proxy puede activarlo; entonces el registro podría incluir la IP de los \
          dispositivos y los dominios a los que se conectan, y este aviso lo indicaría."
+    };
+    let access_log = if cfg.access_log_enabled {
+        let identity = match cfg.access_log_client_ip {
+            ClientIpMode::Pseudonym => {
+                "Tu IP no se guarda: se anota un identificador calculado a partir de ella, que cambia cada día. Aun así, durante ese día permite \
+                 ver qué dominios visitó un mismo dispositivo, y en una red pequeña podría deducirse de quién es."
+            }
+            ClientIpMode::None => "No se anota nada que distinga a tu dispositivo de los demás.",
+        };
+        format!(
+            "<li><strong>Registro de acceso: activado.</strong> Por cada petición y cada conexión cifrada se anota la fecha y hora, el método, el dominio, \
+             el resultado, el tamaño y la duración. En las conexiones cifradas, también el puerto. La ruta solo se anota para contenido servido desde una copia o guardado. \
+             Nunca incluye parámetros de la dirección, cookies, credenciales ni contenido. {identity} Se borra a los {} días.</li>",
+            cfg.access_log_retention_days
+        )
+    } else {
+        "<li>Registro de acceso: desactivado. Quien administra el proxy puede activarlo; entonces anotaría los dominios visitados por cada dispositivo, y este aviso lo indicaría.</li>".to_owned()
     };
     let rate_limit = if cfg.rate_limit_per_minute > 0 {
         format!(
@@ -97,8 +114,9 @@ footer {{ margin-top: 3rem; color: var(--muted); font-size: .875rem; }}
 <ul>
 <li><strong>Copias de contenido:</strong> la respuesta y su dirección, sin parámetros de seguimiento, en el disco del proxy. No indican quién las pidió. Por ahora no se borran solas: permanecen hasta que quien administra el proxy las elimine.</li>
 <li><strong>Nunca se guardan:</strong> cookies, credenciales, formularios enviados ni respuestas a peticiones que lleven cookies o credenciales.</li>
-<li><strong>Registro del proxy:</strong> la dirección de cada contenido servido desde la copia o guardado por primera vez, incluidos sus parámetros, y el destino de las conexiones que fallan, sin tu IP. El proxy no lo conserva por sí mismo en un archivo; si quien lo administra lo guarda, su conservación depende de esa persona.</li>
-<li><strong>Contadores:</strong> totales generales, sin datos por persona.</li>
+<li><strong>Registro del proxy:</strong> la dirección de cada contenido servido desde la copia o guardado por primera vez, sin sus parámetros, y el destino de las conexiones que fallan, sin tu IP. El proxy no lo conserva por sí mismo en un archivo; si quien lo administra lo guarda, su conservación depende de esa persona.</li>
+{access_log}
+<li><strong>Contadores:</strong> totales generales, tiempos de respuesta y uso de disco, sin datos por persona.</li>
 </ul>
 <p>{detailed}</p>
 <p>Quien administra este equipo puede acceder a todo lo anterior.</p>
@@ -160,6 +178,23 @@ mod tests {
 
         let without_contact = Config { operator_contact: "  ".into(), ..cfg() };
         assert!(render(&without_contact, &ca(None), false).contains("No se indicó"));
+    }
+
+    #[test]
+    fn indica_si_el_log_de_acceso_esta_activo() {
+        let page = render(&cfg(), &ca(None), false);
+        assert!(page.contains("Registro de acceso: desactivado"));
+
+        let logged = Config { access_log_enabled: true, access_log_retention_days: 3, ..cfg() };
+        let page = render(&logged, &ca(None), false);
+        assert!(page.contains("Registro de acceso: activado"));
+        assert!(page.contains("Se borra a los 3 días"));
+        assert!(page.contains("qué dominios visitó un mismo dispositivo"));
+
+        let anonymous = Config { access_log_client_ip: ClientIpMode::None, ..logged };
+        let page = render(&anonymous, &ca(None), false);
+        assert!(page.contains("No se anota nada que distinga a tu dispositivo"));
+        assert!(!page.contains("qué dominios visitó un mismo dispositivo"));
     }
 
     #[test]

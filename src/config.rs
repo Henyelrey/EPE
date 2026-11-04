@@ -52,6 +52,30 @@ pub struct Config {
     pub operator_contact: String,
     /// CAs adicionales en las que confiar al conectar con orígenes (intranet, laboratorio).
     pub upstream_extra_ca: Vec<PathBuf>,
+    /// Puerto de administración con /metrics, protegido por token. Vacío = desactivado.
+    pub admin_listen: String,
+    /// Archivo con el token de administración. Si no existe, se genera al arrancar.
+    pub admin_token_file: PathBuf,
+    /// Cada cuántos segundos se mide el uso de disco.
+    pub disk_scan_interval_secs: u64,
+    /// Log de acceso por petición. Apagado por defecto: registra actividad de personas, y
+    /// activarlo debe ser una decisión deliberada. El aviso de transparencia indica si está activo.
+    pub access_log_enabled: bool,
+    /// Carpeta del log de acceso: un archivo por día.
+    pub access_log_dir: PathBuf,
+    /// Días que se conserva el log de acceso, contando el de hoy.
+    pub access_log_retention_days: u64,
+    /// Qué se anota sobre el cliente. La IP real no es una opción.
+    pub access_log_client_ip: ClientIpMode,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ClientIpMode {
+    /// Identificador calculado con una clave que cambia cada día y solo vive en memoria.
+    Pseudonym,
+    /// Nada que permita distinguir a un cliente de otro.
+    None,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -107,6 +131,13 @@ impl Default for Config {
             notice_host: "rayo.aviso".into(),
             operator_contact: String::new(),
             upstream_extra_ca: vec![],
+            admin_listen: "127.0.0.1:9128".into(),
+            admin_token_file: "./ca/admin.token".into(),
+            disk_scan_interval_secs: 300,
+            access_log_enabled: false,
+            access_log_dir: "./logs".into(),
+            access_log_retention_days: 7,
+            access_log_client_ip: ClientIpMode::Pseudonym,
         }
     }
 }
@@ -148,4 +179,30 @@ fn canonical_host(host: &str) -> String {
 pub fn matches_suffix(host: &str, suffix: &str) -> bool {
     let suffix = suffix.trim_start_matches('.').to_ascii_lowercase();
     host == suffix || host.ends_with(&format!(".{suffix}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn la_configuracion_por_defecto_se_puede_escribir_y_releer() {
+        let text = toml::to_string_pretty(&Config::default()).unwrap();
+        let back: Config = toml::from_str(&text).unwrap();
+        assert_eq!(back.access_log_client_ip, ClientIpMode::Pseudonym);
+        assert!(text.contains("access_log_client_ip = \"pseudonym\""));
+    }
+
+    #[test]
+    fn una_configuracion_anterior_no_activa_el_log_de_acceso() {
+        let old: Config = toml::from_str("listen = \"127.0.0.1:3128\"").unwrap();
+        assert!(!old.access_log_enabled);
+        assert_eq!(old.access_log_retention_days, 7);
+    }
+
+    #[test]
+    fn la_ip_real_no_es_una_opcion() {
+        assert!(toml::from_str::<Config>("access_log_client_ip = \"none\"").is_ok());
+        assert!(toml::from_str::<Config>("access_log_client_ip = \"real\"").is_err());
+    }
 }

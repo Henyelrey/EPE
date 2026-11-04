@@ -45,19 +45,22 @@ Los sitios `http://` no usan cifrado, así que el proxy los ve siempre, tengas o
 | Dato | Incluye quién lo pidió | Cuánto dura |
 |---|---|---|
 | Copias de contenido y su dirección | No | Hasta que el responsable las borre |
-| Registro de contenido servido o guardado, con la dirección completa, y de los destinos de conexiones que fallan | No | [indica si se guarda y por cuánto tiempo] |
-| Contadores generales | No | Hasta reiniciar el proxy |
+| Registro de contenido servido o guardado, sin los parámetros de la dirección, y de los destinos de conexiones que fallan | No | [indica si se guarda y por cuánto tiempo] |
+| Contadores generales, tiempos de respuesta y uso de disco | No | Hasta reiniciar el proxy |
 | Tu IP, para aplicar el límite de peticiones | Sí | Solo en memoria, durante el minuto en curso |
+| [Borra esta fila si no activas el registro de acceso] Registro de acceso: fecha y hora, método, dominio, resultado, tamaño y duración de cada petición y conexión cifrada | [Usa una: "Con un identificador que cambia cada día, calculado a partir de tu IP" o "No"] | [días configurados] días |
 
-**Nunca se guardan** cookies, credenciales, formularios enviados ni respuestas a peticiones que lleven cookies o credenciales.
+**Nunca se guardan** cookies, credenciales, formularios enviados ni respuestas a peticiones que lleven cookies o credenciales. El registro de acceso tampoco incluye los parámetros de la dirección, y solo anota la ruta del contenido servido desde una copia o guardado.
 
-Si el responsable activa el registro detallado, el registro puede incluir además la IP de los dispositivos y los dominios a los que se conectan. La página del aviso muestra si está activo.
+[Borra este párrafo si el registro de acceso no usa identificador] El identificador del registro de acceso no contiene tu IP, pero durante un día permite ver qué dominios visitó un mismo dispositivo. En una red pequeña podría deducirse de quién es.
+
+Si el responsable activa el registro detallado, el registro del proxy puede incluir además la IP de los dispositivos y los dominios a los que se conectan. La página del aviso muestra si el registro detallado y el registro de acceso están activos.
 
 **Quién puede ver estos datos:** [personas o cargos]. Técnicamente, quien administra el equipo puede acceder a todos ellos.
 
 ## Cómo comprobarlo
 
-Con el proxy configurado, abre `http://rayo.aviso/`. Esa página se genera a partir de la configuración y el certificado reales, y muestra los dominios, si el registro detallado está activo y la huella del certificado.
+Con el proxy configurado, abre `http://rayo.aviso/`. Esa página se genera a partir de la configuración y el certificado reales, y muestra los dominios, qué registros están activos y la huella del certificado.
 
 La huella SHA-256 debe ser:
 
