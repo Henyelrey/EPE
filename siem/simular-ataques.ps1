@@ -84,14 +84,12 @@ if (($body -join "`n") -match 'contenido envenenado') {
 [IO.File]::WriteAllBytes($caKey, $originalKey)
 Result 'Configuración y clave de demostración restauradas.'
 
+$expected = 100110, 100111, 100120, 100121, 100130, 100131, 100140, 100141, 100150, 100151, 100152, 100160, 100171, 100180, 100182, 100183
 Write-Host ''
-Write-Host 'Esperando 15 s a que las alertas lleguen al panel...'
-Start-Sleep 15
+Write-Host 'Esperando a que las alertas lleguen al índice de Wazuh (60 s como máximo)...'
+$missing = @(Wait-RayoRules $expected 5 60)
 & (Join-Path $Siem 'ver-alertas.ps1') -Minutos 5
 
-$expected = 100110, 100111, 100120, 100121, 100130, 100131, 100140, 100141, 100150, 100151, 100152, 100160, 100171, 100180, 100182, 100183
-$found = Get-RayoAlerts 5 2000 | ForEach-Object { [int]$_.rule.id }
-$missing = @($expected | Where-Object { $found -notcontains $_ })
 if ($missing.Count -eq 0) {
     Write-Host "Comprobación: las $($expected.Count) reglas esperadas llegaron al índice de Wazuh." -ForegroundColor Green
 } else {

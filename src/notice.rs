@@ -107,6 +107,15 @@ pub fn render(cfg: &Config, ca: &CaSummary, detailed_logs: bool) -> String {
     } else {
         String::new()
     };
+    let auto_block = if cfg.auto_block_enabled {
+        format!(
+            "<li><strong>Bloqueo automático: activado.</strong> Si un dispositivo abusa del proxy (muchos rechazos, un volumen muy alto o un intento de escaneo), el proxy deja de atenderlo durante unos {} minutos. \
+             Mientras dura, su IP se guarda en memoria con la hora de vencimiento; desaparece al vencer o al reiniciar. Solo afecta al uso del proxy.</li>",
+            cfg.auto_block_minutes.max(1)
+        )
+    } else {
+        String::new()
+    };
     let connect_ports = if cfg.allowed_connect_ports.is_empty() {
         "<li>Las conexiones cifradas pueden abrirse a cualquier puerto público.</li>".to_owned()
     } else {
@@ -175,7 +184,7 @@ footer {{ margin-top: 3rem; color: var(--muted); font-size: .875rem; }}
 
 <h2>Límites de seguridad</h2>
 <ul>
-{rate_limit}<li>A través del proxy no se puede llegar a este equipo ni a la red local, salvo las redes que quien lo administra haya permitido.</li>
+{rate_limit}{auto_block}<li>A través del proxy no se puede llegar a este equipo ni a la red local, salvo las redes que quien lo administra haya permitido.</li>
 {connect_ports}
 </ul>
 

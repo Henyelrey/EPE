@@ -79,14 +79,12 @@ foreach ($ip in @($attackers.Keys) + @($notBlocked.Keys)) {
     if (-not $ok) { $exitCode = 1 }
 }
 
+$expected = 100111, 100121, 100131, 100140, 100141, 100151, 100160, 100200, 100201, 100202, 100203, 100204, 100251
 Write-Host ''
-Write-Host 'Esperando 10 s a que las alertas lleguen al índice...'
-Start-Sleep 10
+Write-Host 'Esperando a que las alertas lleguen al índice de Wazuh (60 s como máximo)...'
+$missing = @(Wait-RayoRules $expected 5 60)
 & (Join-Path $Siem 'ver-alertas.ps1') -Minutos 5
 
-$expected = 100111, 100121, 100131, 100140, 100141, 100151, 100160, 100200, 100201, 100202, 100203, 100204, 100251
-$found = Get-RayoAlerts 5 2000 | ForEach-Object { [int]$_.rule.id }
-$missing = @($expected | Where-Object { $found -notcontains $_ })
 if ($missing.Count -eq 0) {
     Write-Host "Comprobación: las $($expected.Count) reglas esperadas llegaron al índice de Wazuh." -ForegroundColor Green
 } else {

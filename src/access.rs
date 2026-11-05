@@ -1,5 +1,6 @@
 //! Quién puede usar el proxy, cuánto y hacia qué destinos.
 
+use crate::ban::BanList;
 use crate::config::Config;
 use crate::store::now;
 use anyhow::{bail, Context};
@@ -7,7 +8,7 @@ use std::collections::HashMap;
 use std::io;
 use std::net::{IpAddr, SocketAddr};
 use std::str::FromStr;
-use std::sync::{LazyLock, Mutex};
+use std::sync::{Arc, LazyLock, Mutex};
 
 /// Red en notación CIDR. Una IP sin prefijo equivale a esa sola dirección.
 #[derive(Debug, Clone, Copy)]
@@ -67,6 +68,8 @@ pub enum ClientDecision {
     Allow,
     Denied,
     RateLimited,
+    /// La IP tiene un auto-bloqueo en curso (ban.rs).
+    Blocked,
 }
 
 /// Decide si un cliente puede usar el proxy en este momento.
@@ -76,6 +79,8 @@ pub struct ClientGate {
     /// Minuto en curso y peticiones de cada IP en él. Se vacía al cambiar de minuto,
     /// así que su tamaño queda acotado por los clientes permitidos.
     window: Mutex<(u64, HashMap<IpAddr, u32>)>,
+    /// Lista de auto-bloqueo. Si una IP está bloqueada, se rechaza antes que nada.
+    bans: Option<Arc<BanList>>,
 }
 
 impl ClientGate {
@@ -94,7 +99,12 @@ impl ClientGate {
                  Agrega la subred de tus clientes, por ejemplo \"192.168.1.0/24\""
             );
         }
-        Ok(Self { allowed, limit_per_minute: cfg.rate_limit_per_minute, window: Mutex::new((0, HashMap::new())) })
+        Ok(Self { allowed, limit_per_minute: cfg.rate_limit_per_minute, window: Mutex::new((0, HashMap::new())), bans: None })
+    }
+
+    /// Conecta la lista de auto-bloqueo. Sin ella, la puerta nunca devuelve `Blocked`.
+    pub fn set_bans(&mut self, bans: Arc<BanList>) {
+        self.bans = Some(bans);
     }
 
     pub fn check(&self, client: IpAddr) -> ClientDecision {
@@ -103,6 +113,11 @@ impl ClientGate {
 
     fn check_at(&self, client: IpAddr, minute: u64) -> ClientDecision {
         let client = client.to_canonical();
+        if let Some(bans) = &self.bans {
+            if bans.is_blocked(client) {
+                return ClientDecision::Blocked;
+            }
+        }
         if !self.allowed.iter().any(|n| n.contains(client)) {
             return ClientDecision::Denied;
         }

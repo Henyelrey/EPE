@@ -80,6 +80,12 @@ pub struct Config {
     pub detect_bytes_per_minute: u64,
     /// Respuestas 403 o 404, del origen o del propio proxy.
     pub detect_denied_per_minute: u64,
+    /// Auto-bloqueo (IPS): cuando el detector marca a una IP como abusiva (rechazos, volumen o escaneo),
+    /// el proxy deja de atenderla durante `auto_block_minutes`. Apagado por defecto; necesita
+    /// `detections_enabled`. El bloqueo solo afecta al proxy y queda registrado para el SIEM.
+    pub auto_block_enabled: bool,
+    /// Minutos que dura cada auto-bloqueo. Cada alerta nueva de esa IP reinicia el plazo.
+    pub auto_block_minutes: u64,
     /// Registro en vivo en el panel: últimas peticiones con su dominio, solo en memoria y visibles
     /// solo con el token. Apagado por defecto: muestra qué pide cada equipo. El aviso indica si está activo.
     pub live_log_enabled: bool,
@@ -190,6 +196,8 @@ impl Default for Config {
             detect_requests_per_minute: 3000,
             detect_bytes_per_minute: 1024 * 1024 * 1024,
             detect_denied_per_minute: 100,
+            auto_block_enabled: false,
+            auto_block_minutes: 10,
             live_log_enabled: false,
             live_log_client: LiveClientMode::Pseudonym,
             security_log_enabled: false,

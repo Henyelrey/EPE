@@ -258,6 +258,7 @@ pub fn start(cfg: &Config, stats: Arc<Stats>, clients: Arc<ClientStats>, detecto
             monitor.update(evaluate(&inputs, &thresholds));
             clients.forget_idle();
             detector.forget_old();
+            detector.expire_bans();
             save_stats(&data_dir, &stats).await;
         }
     });

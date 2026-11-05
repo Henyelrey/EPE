@@ -208,6 +208,21 @@
     <group>syscheck,tampering,attack,</group>
   </rule>
 
+  <!-- Auto-bloqueo del propio proxy (config auto_block_enabled). -->
+  <rule id="100190" level="10">
+    <if_sid>100100</if_sid>
+    <field name="event">^ip_bloqueada$</field>
+    <description>rayo-cache: bloqueó a $(srcip) por abuso ($(reason))</description>
+    <mitre><id>T1595</id></mitre>
+    <group>access_denied,attack,</group>
+  </rule>
+
+  <rule id="100191" level="3">
+    <if_sid>100100</if_sid>
+    <field name="event">^ip_desbloqueada$</field>
+    <description>rayo-cache: se levantó el bloqueo de $(srcip)</description>
+  </rule>
+
 </group>
 
 <!--

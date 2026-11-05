@@ -7,6 +7,7 @@
 mod access;
 mod access_log;
 mod admin;
+mod ban;
 mod ca;
 mod clients;
 mod coalesce;
@@ -39,7 +40,7 @@ async fn main() -> anyhow::Result<()> {
     let cfg = config::Config::load_or_create(&cfg_path)?;
     let addr: SocketAddr = cfg.listen.parse()?;
 
-    let clients = access::ClientGate::new(&cfg, addr)?;
+    let mut clients = access::ClientGate::new(&cfg, addr)?;
     let destinations = Arc::new(access::DestinationPolicy::new(&cfg)?);
     let stats = Arc::new(stats::Stats::default());
 
@@ -107,7 +108,16 @@ async fn main() -> anyhow::Result<()> {
         bytes_per_minute: cfg.detect_bytes_per_minute,
         denied_per_minute: cfg.detect_denied_per_minute,
     };
-    let detector = Arc::new(detect::Detector::new(cfg.detections_enabled, limits, stats.clone()).with_security_log(security.clone()));
+    let bans = Arc::new(ban::BanList::new(cfg.auto_block_enabled, cfg.auto_block_minutes.saturating_mul(60), Some(security.clone())));
+    clients.set_bans(bans.clone());
+    if cfg.auto_block_enabled {
+        if cfg.detections_enabled {
+            tracing::info!("auto-bloqueo activo: una IP abusiva deja de poder usar el proxy durante {} min. El aviso a los usuarios lo indica.", cfg.auto_block_minutes.max(1));
+        } else {
+            tracing::warn!("auto_block_enabled está activo, pero detections_enabled no: sin detecciones no se bloquea a nadie.");
+        }
+    }
+    let detector = Arc::new(detect::Detector::new(cfg.detections_enabled, limits, stats.clone()).with_security_log(security.clone()).with_ban_list(bans.clone()));
     let health = Arc::new(monitor::Monitor::new(ca_summary.not_after).with_security_log(security.clone()));
     let live_log = Arc::new(live::LiveLog::new(cfg.live_log_enabled, cfg.live_log_client));
     let traffic = Arc::new(live::Traffic::default());

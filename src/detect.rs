@@ -9,6 +9,7 @@
 //! - Cuenta por minuto de reloj, así que una ráfaga repartida entre dos minutos puede no llegar al umbral.
 //! - Hudsucker no expone los bytes de un túnel, y tampoco lee el SNI si el dominio no se intercepta.
 
+use crate::ban::BanList;
 use crate::monitor::format_bytes;
 use crate::security::{SecurityEvent, SecurityLog};
 use crate::stats::Stats;
@@ -104,17 +105,47 @@ pub struct Detector {
     stats: Arc<Stats>,
     state: Mutex<State>,
     security: Option<Arc<SecurityLog>>,
+    bans: Option<Arc<BanList>>,
+}
+
+/// Qué tipos de aviso disparan un auto-bloqueo. El desajuste de Host solo avisa (nivel bajo).
+fn block_reason(kind: Kind) -> Option<&'static str> {
+    match kind {
+        Kind::Denied => Some("denied"),
+        Kind::Volume => Some("volume"),
+        Kind::RarePort => Some("rare_port"),
+        Kind::HostMismatch => None,
+    }
 }
 
 impl Detector {
     pub fn new(enabled: bool, limits: Limits, stats: Arc<Stats>) -> Self {
-        Self { enabled, limits, stats, state: Mutex::new(State::default()), security: None }
+        Self { enabled, limits, stats, state: Mutex::new(State::default()), security: None, bans: None }
     }
 
     /// Copia al log de seguridad los avisos que no se registran ya en otro sitio.
     pub fn with_security_log(mut self, security: Arc<SecurityLog>) -> Self {
         self.security = Some(security);
         self
+    }
+
+    /// Conecta la lista de auto-bloqueo: al marcar a una IP como abusiva, se la bloquea.
+    pub fn with_ban_list(mut self, bans: Arc<BanList>) -> Self {
+        self.bans = Some(bans);
+        self
+    }
+
+    /// Libera los bloqueos vencidos. Lo llama el mantenimiento periódico.
+    pub fn expire_bans(&self) {
+        if let Some(bans) = &self.bans {
+            bans.expire();
+        }
+    }
+
+    fn try_block(&self, client: IpAddr, kind: Kind, detail: &str) {
+        if let (Some(bans), Some(reason)) = (&self.bans, block_reason(kind)) {
+            bans.block(client, reason, detail);
+        }
     }
 
     fn log_security(&self, kind: Kind, ip: IpAddr, detail: &str) {
@@ -173,6 +204,7 @@ impl Detector {
         }
         for (kind, detail) in found {
             self.log_security(kind, client, &detail);
+            self.try_block(client, kind, &detail);
             state.note(&self.stats, kind, client, detail, at);
         }
     }
@@ -190,6 +222,7 @@ impl Detector {
     fn report(&self, client: IpAddr, kind: Kind, detail: String) {
         if self.enabled {
             self.log_security(kind, client.to_canonical(), &detail);
+            self.try_block(client.to_canonical(), kind, &detail);
             let mut state = self.state.lock().expect("las detecciones no se envenenan");
             state.note(&self.stats, kind, client.to_canonical(), detail, now());
         }

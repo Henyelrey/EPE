@@ -63,6 +63,17 @@ Todo ocurre dentro de este PC. Las direcciones `127.0.0.x` hacen de otros equipo
 | Clave de la CA alterada | Disco | Revisión de integridad | 100180 | 14 | T1552.004 |
 | Configuración alterada | Disco | Revisión de integridad | 100182 | 10 | T1562.001 |
 
+## Bloqueo automático en el propio proxy
+
+Con `auto_block_enabled = true` (activado en esta demo), cuando el detector marca a una IP como abusiva —muchos rechazos, un volumen muy alto o un intento de escaneo— el proxy **deja de atenderla** durante `auto_block_minutes` (10 por defecto). Cada alerta nueva de esa IP reinicia el plazo; al vencer, se libera sola.
+
+| Evento del proxy | Regla de Wazuh | Nivel |
+|---|---|---|
+| `ip_bloqueada` | 100190 | 10 |
+| `ip_desbloqueada` | 100191 | 3 |
+
+Es un IPS a nivel de aplicación: corta el uso del proxy con la IP real del atacante, sin permisos de administrador y sin iptables, pero no cierra otros puertos de la máquina. Para probarlo: haz que un equipo escanee un puerto o acumule rechazos; luego ese equipo recibe `403` en cualquier petición, mientras los demás siguen navegando. Viene **apagado por defecto** en el proxy real; actívalo solo en redes donde una IP identifique a un equipo, no a muchas personas tras un NAT.
+
 ## Cómo está montado
 
 - **Log de seguridad:** el proxy escribe `siem/demo/logs/security-AAAA-MM-DD.jsonl`, una línea JSON por evento. La sección "Log de seguridad para un SIEM" del [README principal](../README.md) describe cada evento.
@@ -79,7 +90,7 @@ Esta configuración no sirve para producción:
 - **Direcciones simuladas:** las `127.0.0.x` imitan otros equipos. Un ataque real desde la red necesitaría que el proxy escuche en esa red y que `allowed_clients` lo permita.
 - **Atacante con control del PC:** podría borrar el log antes de que Wazuh lo lea. Un agente reduce ese margen, porque envía los eventos en cuanto aparecen.
 - **Sin análisis de vulnerabilidades:** está desactivado porque descarga una base de datos de unos 11 GB y aquí no hay agentes que analizar.
-- **Sin bloqueo automático:** Wazuh avisa, pero no bloquea. Tampoco hay bloqueo de IPs en el puerto de administración, así que el token debe seguir siendo largo y aleatorio. El [laboratorio](#laboratorio-con-suricata-y-bloqueo-automático) añade ambas cosas.
+- **Bloqueo solo a nivel del proxy:** el auto-bloqueo corta el uso del proxy, pero no cierra otros puertos de la máquina ni actúa sobre el puerto de administración, así que el token debe seguir siendo largo y aleatorio. El [laboratorio](#laboratorio-con-suricata-y-bloqueo-automático) añade el bloqueo a nivel de red con iptables y la detección con Suricata.
 - **Tráfico cifrado sin descifrar:** los túneles solo dejan el puerto y el destino. Wazuh no ve lo que viaja dentro.
 
 ## Laboratorio con Suricata y bloqueo automático

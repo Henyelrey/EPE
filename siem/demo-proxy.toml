@@ -22,6 +22,9 @@ alert_ca_days = 0
 
 detections_enabled = true
 detect_denied_per_minute = 5
+# Bloqueo automático: tras 5 rechazos en un minuto, o un escaneo, el proxy deja de atender a esa IP 10 min.
+auto_block_enabled = true
+auto_block_minutes = 10
 
 security_log_enabled = true
 security_log_dir = "./logs"

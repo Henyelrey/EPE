@@ -38,7 +38,7 @@ El certificado no sirve para descifrar otros sitios: tu dispositivo lo rechazar�
 
 Todo lo demás pasa cifrado, incluidos los bancos y servicios de inicio de sesión protegidos. De esos sitios, el proxy solo ve tu IP, el dominio y el puerto. Estas conexiones solo pueden abrirse a estos puertos: [los de `allowed_connect_ports`; por defecto, 80 y 443].
 
-El proxy avisa a quien lo administra de la actividad inusual: un volumen muy alto, muchos rechazos, intentos de abrir un puerto no permitido o un nombre que no coincide con su destino. Un aviso señala un dispositivo, no a una persona, y no bloquea nada.
+El proxy avisa a quien lo administra de la actividad inusual: un volumen muy alto, muchos rechazos, intentos de abrir un puerto no permitido o un nombre que no coincide con su destino. Un aviso señala un dispositivo, no a una persona. [Borra esta frase si no activas el bloqueo automático:] Si el bloqueo automático está activo, además el proxy deja de atender durante unos minutos al dispositivo que abusa (muchos rechazos, un volumen muy alto o un intento de escaneo); el bloqueo solo afecta al uso del proxy.
 
 Los sitios `http://` no usan cifrado, así que el proxy los ve siempre, tengas o no el certificado.
 
@@ -53,6 +53,7 @@ Los sitios `http://` no usan cifrado, así que el proxy los ve siempre, tengas o
 | Tu IP, para aplicar el límite de peticiones | Sí | Solo en memoria, durante el minuto en curso |
 | [Borra esta fila si no activas los totales por dispositivo] Tu IP junto a cuántas peticiones y bytes usaste y cuándo fue la última vez, pero no qué sitios | Sí | Solo en memoria: se olvida tras un día sin actividad o al reiniciar el proxy |
 | [Borra esta fila si desactivas las detecciones] Aviso de actividad inusual: tu IP, el tipo de aviso, cuántas veces ocurrió, cuándo y, si aplica, el puerto, pero no qué sitios | Sí | Solo en memoria: se olvida tras un día o al reiniciar el proxy |
+| [Borra esta fila si no activas el bloqueo automático] Mientras un dispositivo está bloqueado por abuso: su IP y la hora de vencimiento, no qué sitios | Sí | Solo en memoria: unos minutos, hasta vencer o reiniciar el proxy |
 | [Borra esta fila si no activas el registro en vivo] Registro en vivo en el panel: fecha y hora, método, dominio, resultado, tamaño y duración de las últimas 1000 peticiones y conexiones cifradas | [Usa una: "Con tu IP", "Con un identificador que cambia cada día, calculado a partir de tu IP" o "No"] | Solo en memoria: se olvida tras un día o al reiniciar el proxy |
 | [Borra esta fila si no activas el registro de seguridad] Eventos anómalos: fecha y hora, tipo de evento y, si aplica, el destino bloqueado, sin tu navegación normal. Los recibe el sistema de monitoreo de seguridad [indica cuál y quién lo revisa] | Sí, con tu IP | [días configurados] días en el proxy; [indica cuánto se conserva en el sistema de monitoreo] |
 | [Borra esta fila si no activas el registro de acceso] Registro de acceso: fecha y hora, método, dominio, resultado, tamaño y duración de cada petición y conexión cifrada | [Usa una: "Con un identificador que cambia cada día, calculado a partir de tu IP" o "No"] | [días configurados] días |

@@ -129,6 +129,18 @@ function Get-RayoAlerts($minutes, $limit) {
     return @($result.hits.hits | ForEach-Object { $_._source })
 }
 
+# Espera a que estén en el índice todas las reglas indicadas: las últimas alertas tardan unos segundos en
+# llegar. Consulta cada 5 s hasta $seconds y devuelve las que siguen faltando (nada si llegaron todas).
+function Wait-RayoRules($expected, $minutes, $seconds) {
+    $deadline = (Get-Date).AddSeconds($seconds)
+    while ($true) {
+        $found = Get-RayoAlerts $minutes 2000 | ForEach-Object { [int]$_.rule.id }
+        $missing = @($expected | Where-Object { $found -notcontains $_ })
+        if ($missing.Count -eq 0 -or (Get-Date) -ge $deadline) { return $missing }
+        Start-Sleep 5
+    }
+}
+
 function Test-ProxyRunning {
     $file = Join-Path $Demo 'proxy.pid'
     if (-not (Test-Path $file)) { return $false }

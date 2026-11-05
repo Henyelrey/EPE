@@ -353,6 +353,12 @@ impl HttpHandler for CacheHandler {
                 res.headers_mut().insert(header::RETRY_AFTER, HeaderValue::from_static("60"));
                 return res.into();
             }
+            // El bloqueo ya se registró al ponerse: aquí solo se rechaza, sin volver a anotar cada intento.
+            ClientDecision::Blocked => {
+                Stats::inc(&sh.stats.denied_clients);
+                tracing::debug!(%client, "cliente con auto-bloqueo en curso");
+                return empty_response(StatusCode::FORBIDDEN).into();
+            }
         }
 
         // Hudsucker también pasa aquí el CONNECT inicial del túnel: no es contenido.
