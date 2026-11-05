@@ -94,6 +94,6 @@ if ($missing.Count -eq 0) {
     $exitCode = 1
 }
 Write-Host ''
-Write-Host 'Los bloqueos vencen solos a los 10 minutos (regla 100252).'
+Write-Host 'Los bloqueos vencen solos 10 minutos después de la última alerta de cada IP (regla 100252).'
 Write-Host "Míralas en el panel: $PanelUrl (Threat Hunting > Events, filtro rule.groups:rayo)"
 exit $exitCode

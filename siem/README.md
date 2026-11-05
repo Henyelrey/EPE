@@ -101,6 +101,8 @@ La demo anterior solo avisa. El laboratorio añade lo que le falta: **Suricata**
 2. Si salta una regla de ataque probable, el manager ordena al agente ejecutar [`rayo-bloquear`](lab/gateway/rayo-bloquear).
 3. El script añade `-s IP -j DROP` a la cadena `RAYO-BLOQUEO` y lo anota. A los 10 minutos Wazuh ordena quitarlo.
 
+Cada alerta nueva de una IP ya bloqueada vuelve a contar los 10 minutos desde cero. Suricata ve los paquetes antes que iptables, así que quien siga escaneando estando bloqueado seguirá bloqueado.
+
 ### Uso
 
 Requiere lo mismo que la demo anterior, pero no Python ni Rust: el proxy se compila dentro de Docker. La primera vez descarga unos 500 MB más y compila el proxy en un par de minutos. Después, `levantar-lab.ps1` tarda alrededor de un minuto. Los contenedores del laboratorio suman unos 150 MB de memoria a los de Wazuh.
