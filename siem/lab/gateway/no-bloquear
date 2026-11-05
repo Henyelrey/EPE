@@ -1,0 +1,8 @@
+# IPs que la respuesta activa nunca bloquea, una por línea: bloquearlas dejaría el laboratorio sin SIEM,
+# sin origen o bloqueándose a sí mismo.
+127.0.0.1
+::1
+10.77.0.1
+10.77.0.5
+10.77.0.10
+10.77.0.20

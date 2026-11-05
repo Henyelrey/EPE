@@ -1,0 +1,17 @@
+<!-- Solo en el laboratorio: bloquea con iptables, en el gateway, la IP de los ataques probables. -->
+<ossec_config>
+  <command>
+    <name>rayo-bloquear</name>
+    <executable>rayo-bloquear</executable>
+    <timeout_allowed>yes</timeout_allowed>
+  </command>
+
+  <!-- Ataques del proxy (1001xx) y de Suricata (1002xx). Los niveles menores solo avisan. -->
+  <active-response>
+    <disabled>no</disabled>
+    <command>rayo-bloquear</command>
+    <location>local</location>
+    <rules_id>100111,100121,100131,100141,100151,100200,100201,100202,100203,100204</rules_id>
+    <timeout>600</timeout>
+  </active-response>
+</ossec_config>

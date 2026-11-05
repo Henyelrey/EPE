@@ -209,3 +209,80 @@
   </rule>
 
 </group>
+
+<!--
+  Laboratorio: alertas de Suricata en el gateway. 86601 es la regla de Wazuh para cualquier alerta de
+  Suricata; aquí se suben de nivel las firmas propias de siem/lab/suricata/rayo.rules.
+-->
+<group name="rayo,suricata,">
+
+  <rule id="100200" level="10">
+    <if_sid>86601</if_sid>
+    <field name="alert.signature_id">^9100001$</field>
+    <description>Suricata: escaneo de puertos contra el gateway desde $(src_ip)</description>
+    <mitre><id>T1046</id></mitre>
+    <group>recon,attack,</group>
+  </rule>
+
+  <rule id="100201" level="12">
+    <if_sid>86601</if_sid>
+    <field name="alert.signature_id">^9100002$</field>
+    <description>Suricata: intento de Log4Shell a través del proxy desde $(src_ip)</description>
+    <mitre><id>T1190</id></mitre>
+    <group>exploit,attack,</group>
+  </rule>
+
+  <rule id="100202" level="10">
+    <if_sid>86601</if_sid>
+    <field name="alert.signature_id">^9100003$</field>
+    <description>Suricata: inyección SQL a través del proxy desde $(src_ip)</description>
+    <mitre><id>T1190</id></mitre>
+    <group>web_attack,attack,</group>
+  </rule>
+
+  <rule id="100203" level="10">
+    <if_sid>86601</if_sid>
+    <field name="alert.signature_id">^9100004$</field>
+    <description>Suricata: herramienta de ataque web desde $(src_ip)</description>
+    <mitre><id>T1595.002</id></mitre>
+    <group>recon,attack,</group>
+  </rule>
+
+  <rule id="100204" level="10">
+    <if_sid>86601</if_sid>
+    <field name="alert.signature_id">^9100005$</field>
+    <description>Suricata: petición a los metadatos de la nube desde $(src_ip)</description>
+    <mitre><id>T1552.005</id></mitre>
+    <group>ssrf,attack,</group>
+  </rule>
+
+</group>
+
+<!-- Laboratorio: lo que hizo la respuesta activa (siem/lab/gateway/rayo-bloquear). -->
+<group name="rayo,active_response,">
+
+  <rule id="100250" level="0">
+    <decoded_as>json</decoded_as>
+    <field name="app">^rayo-ips$</field>
+    <description>rayo-ips: respuesta activa</description>
+  </rule>
+
+  <rule id="100251" level="8">
+    <if_sid>100250</if_sid>
+    <field name="event">^ip_bloqueada$</field>
+    <description>rayo-ips: $(srcip) bloqueada con iptables por la regla $(reason)</description>
+  </rule>
+
+  <rule id="100252" level="3">
+    <if_sid>100250</if_sid>
+    <field name="event">^ip_desbloqueada$</field>
+    <description>rayo-ips: venció el bloqueo de $(srcip)</description>
+  </rule>
+
+  <rule id="100253" level="5">
+    <if_sid>100250</if_sid>
+    <field name="event">^bloqueo_omitido$</field>
+    <description>rayo-ips: no se bloqueó $(srcip) tras la regla $(reason)</description>
+  </rule>
+
+</group>

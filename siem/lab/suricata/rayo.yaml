@@ -1,0 +1,27 @@
+%YAML 1.1
+---
+# Se aplica encima del suricata.yaml de la imagen con --include. Cada sección de aquí reemplaza entera a
+# la de la imagen: por eso HOME_NET se pasa con --set en compose.lab.yml y no se redefine "vars".
+
+# Sin salida de estadísticas: solo interesan las alertas.
+stats:
+  enabled: no
+
+default-rule-path: /lab
+rule-files:
+  - rayo.rules
+
+# Solo alertas, sin contenido: Suricata ve las direcciones completas, con parámetros que pueden llevar
+# tokens, y el proxy nunca las registra. Así eve.json guarda lo mismo que se ve en Wazuh.
+outputs:
+  - eve-log:
+      enabled: yes
+      filetype: regular
+      filename: eve.json
+      types:
+        - alert:
+            payload: no
+            packet: no
+            metadata: no
+            http-body: no
+            tagged-packets: no

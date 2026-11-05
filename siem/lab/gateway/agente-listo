@@ -1,0 +1,14 @@
+#!/bin/sh
+# Sale con 0 cuando el agente ya puede bloquear: está conectado al manager, recibió la respuesta activa
+# y volvió a arrancar wazuh-execd después de recibirla.
+#
+# Un agente nuevo espera 20 s antes de conectarse y, tras conectarse, recibe ar.conf del manager y se
+# reinicia. Una orden de bloqueo que llegue antes de eso se pierde sin dejar rastro.
+LOG=/var/ossec/logs/ossec.log
+
+grep -q "^status='connected'" /var/ossec/var/run/wazuh-agentd.state 2>/dev/null || exit 1
+grep -q rayo-bloquear /var/ossec/etc/shared/ar.conf 2>/dev/null || exit 1
+
+reload=$(grep -n 'Agent is reloading due to shared configuration changes' "$LOG" | tail -n 1 | cut -d: -f1)
+started=$(grep -n 'wazuh-execd: INFO: Started' "$LOG" | tail -n 1 | cut -d: -f1)
+[ -n "$reload" ] && [ -n "$started" ] && [ "$started" -gt "$reload" ]

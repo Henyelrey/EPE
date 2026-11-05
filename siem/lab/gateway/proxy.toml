@@ -1,0 +1,29 @@
+# Proxy del laboratorio. Escucha en la red de Docker 10.77.0.0/24, no en tu red.
+listen = "0.0.0.0:3128"
+operator_contact = "lab@example.invalid"
+
+# 10.77.0.1 a 10.77.0.126 hacen de equipos de la red. 10.77.0.200 queda fuera y hace de intruso.
+allowed_clients = ["10.77.0.0/25"]
+rate_limit_per_minute = 30
+allowed_connect_ports = [80, 443]
+# Solo el origen de pruebas. El SIEM (10.77.0.5) y el resto de la red interna quedan bloqueados.
+allowed_internal_networks = ["10.77.0.20/32"]
+
+data_dir = "./data"
+ca_cert = "./ca/rayo-ca.crt"
+ca_key = "./ca/rayo-ca.key"
+# Abierto a la red del laboratorio para poder simular la fuerza bruta. El token viaja sin cifrar.
+admin_listen = "0.0.0.0:9128"
+admin_token_file = "./ca/admin.token"
+
+cache_plain_http = true
+intercept_domains = ["localhost"]
+maintenance_interval_secs = 5
+alert_ca_days = 0
+
+detections_enabled = true
+detect_denied_per_minute = 5
+
+security_log_enabled = true
+security_log_dir = "./logs"
+security_log_retention_days = 7

@@ -1,0 +1,15 @@
+<!-- Se añade al ossec.conf del agente que instala el paquete. -->
+<ossec_config>
+  <localfile>
+    <log_format>json</log_format>
+    <location>/opt/rayo/logs/security-*.jsonl</location>
+  </localfile>
+  <localfile>
+    <log_format>json</log_format>
+    <location>/var/log/suricata/eve.json</location>
+  </localfile>
+  <localfile>
+    <log_format>json</log_format>
+    <location>/var/log/rayo-ips/bloqueos.jsonl</location>
+  </localfile>
+</ossec_config>

@@ -1,0 +1,18 @@
+# Reglas de Suricata para el laboratorio. HOME_NET es solo el gateway (10.77.0.10).
+# Detectan lo que el proxy no ve (el tráfico que no es para él) o deja pasar (peticiones permitidas con
+# contenido malicioso). Wazuh las convierte en las alertas 100200 a 100204.
+
+# Escaneo de red contra el gateway: muchos SYN a puertos que no son del proxy ni del panel.
+alert tcp $EXTERNAL_NET any -> $HOME_NET ![3128,9128] (msg:"RAYO escaneo de puertos contra el gateway"; flow:to_server; flags:S,12; threshold:type both, track by_src, count 15, seconds 30; classtype:attempted-recon; sid:9100001; rev:1;)
+
+# Log4Shell: el proxy reenvía la cabecera al origen sin mirarla.
+alert http $EXTERNAL_NET any -> $HOME_NET any (msg:"RAYO intento de Log4Shell (JNDI) a traves del proxy"; flow:established,to_server; http.header; content:"${jndi:"; nocase; reference:cve,2021-44228; classtype:attempted-admin; sid:9100002; rev:1;)
+
+# Inyección SQL en la dirección pedida a través del proxy.
+alert http $EXTERNAL_NET any -> $HOME_NET any (msg:"RAYO inyeccion SQL a traves del proxy"; flow:established,to_server; http.uri; content:"union"; nocase; content:"select"; nocase; distance:0; classtype:web-application-attack; sid:9100003; rev:1;)
+
+# Herramientas de ataque que se identifican en el User-Agent.
+alert http $EXTERNAL_NET any -> $HOME_NET any (msg:"RAYO herramienta de ataque web en el User-Agent"; flow:established,to_server; http.user_agent; pcre:"/(sqlmap|nikto|nmap scripting engine|masscan|zgrab)/i"; classtype:web-application-attack; sid:9100004; rev:1;)
+
+# Metadatos de la nube: el proxy ya lo bloquea; Suricata lo confirma desde la red.
+alert http $EXTERNAL_NET any -> $HOME_NET any (msg:"RAYO peticion a los metadatos de la nube a traves del proxy"; flow:established,to_server; http.host; content:"169.254.169.254"; classtype:attempted-recon; sid:9100005; rev:1;)

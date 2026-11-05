@@ -1,0 +1,75 @@
+# Laboratorio con Suricata y bloqueo automático. Se aplica encima del docker-compose.yml oficial de Wazuh
+# y de compose.rayo.yml. Las rutas son relativas a siem/wazuh-docker/single-node.
+#
+# Todo vive en la red de Docker 10.77.0.0/24: nada se publica fuera de este PC.
+#   10.77.0.5   wazuh.manager   recibe los eventos del agente y ordena los bloqueos
+#   10.77.0.10  rayo-gateway    proxy + iptables + agente de Wazuh; Suricata escucha su interfaz
+#   10.77.0.20  rayo-origen     origen de pruebas
+#   resto       cliente legítimo y atacantes, que lanza simular-ataques-lab.ps1
+
+networks:
+  lab:
+    name: rayo-lab
+    ipam:
+      config:
+        - subnet: 10.77.0.0/24
+
+volumes:
+  rayo_lab_suricata:
+
+services:
+  wazuh.manager:
+    networks:
+      default:
+      lab:
+        ipv4_address: 10.77.0.5
+
+  rayo-gateway:
+    build:
+      context: ../../..
+      dockerfile: siem/lab/gateway.Dockerfile
+    image: rayo-lab-gateway
+    hostname: rayo-gateway
+    restart: "no"
+    init: true
+    # El proxy guarda sus contadores y cierra el log con Ctrl+C.
+    stop_signal: SIGINT
+    # Para que la respuesta activa pueda escribir reglas de iptables en su propia red.
+    cap_add: [NET_ADMIN]
+    networks:
+      lab:
+        ipv4_address: 10.77.0.10
+    volumes:
+      - rayo_lab_suricata:/var/log/suricata:ro
+    depends_on:
+      - wazuh.manager
+      - rayo-origen
+
+  rayo-suricata:
+    image: jasonish/suricata:8.0.7
+    restart: "no"
+    # Comparte la red del gateway: ve cada paquete que entra o sale de él.
+    network_mode: service:rayo-gateway
+    cap_add: [NET_ADMIN, NET_RAW, SYS_NICE]
+    # Fuera de /etc/suricata: al arrancar, la imagen cambia el dueño de todo lo que hay ahí y fallaría
+    # con un montaje de solo lectura.
+    volumes:
+      - rayo_lab_suricata:/var/log/suricata
+      - ../../lab/suricata:/lab:ro
+    # -k none: en Docker las sumas de verificación se calculan en la tarjeta y Suricata las vería mal.
+    # HOME_NET es solo el gateway: todo lo demás, incluido el resto de la red, cuenta como externo.
+    command: ["-i", "eth0", "-k", "none", "--include", "/lab/rayo.yaml",
+              "--set", "vars.address-groups.HOME_NET=[10.77.0.10]"]
+    depends_on:
+      - rayo-gateway
+
+  rayo-origen:
+    build:
+      context: ../../..
+      dockerfile: siem/lab/herramientas.Dockerfile
+    image: rayo-lab-herramientas
+    restart: "no"
+    command: ["python3", "/lab/origen_demo.py", "0.0.0.0"]
+    networks:
+      lab:
+        ipv4_address: 10.77.0.20

@@ -4,7 +4,7 @@ param([int]$Minutos = 30, [int]$Limite = 2000)
 
 $alerts = Get-RayoAlerts $Minutos $Limite
 Write-Host "$($alerts.Count) alerta(s) de rayo-cache en los últimos $Minutos minutos, agrupadas por regla y origen:"
-$alerts | Group-Object { "$($_.rule.id)|$($_.data.srcip)" } | ForEach-Object {
+$alerts | Group-Object { "$($_.rule.id)|$($_.data.srcip)$($_.data.src_ip)" } | ForEach-Object {
     $times = $_.Group | ForEach-Object { [datetime]$_.timestamp } | Sort-Object
     $alert = $_.Group[0]
     [pscustomobject]@{
@@ -12,7 +12,7 @@ $alerts | Group-Object { "$($_.rule.id)|$($_.data.srcip)" } | ForEach-Object {
         Veces       = $_.Count
         Nivel       = $alert.rule.level
         Regla       = $alert.rule.id
-        Origen      = $alert.data.srcip
+        Origen      = $(if ($alert.data.srcip) { $alert.data.srcip } else { $alert.data.src_ip })
         MITRE       = ($alert.rule.mitre.id -join ',')
         Descripcion = $alert.rule.description
     }

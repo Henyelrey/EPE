@@ -1,0 +1,64 @@
+#!/bin/sh
+# Respuesta activa de Wazuh: bloquea con iptables la IP de origen de una alerta y la desbloquea al vencer.
+#
+# Wazuh lo ejecuta en el agente con una línea JSON en la entrada: "add" al dispararse una regla y "delete"
+# cuando pasa el <timeout> de la respuesta activa. Sirve para las alertas del proxy (data.srcip) y para
+# las de Suricata (data.src_ip), que firewall-drop no entiende.
+#
+# Cada acción deja una línea en bloqueos.jsonl, que el agente envía a Wazuh (reglas 100250 a 100253).
+
+CHAIN=RAYO-BLOQUEO
+LOG=/var/log/rayo-ips/bloqueos.jsonl
+NO_BLOQUEAR=/etc/rayo-ips/no-bloquear
+
+IFS= read -r input || exit 0
+field() { printf '%s' "$input" | jq -r "$1 // empty" 2>/dev/null; }
+
+command=$(field '.command')
+ip=$(field '.parameters.alert.data.srcip // .parameters.alert.data.src_ip')
+rule=$(field '.parameters.alert.rule.id')
+description=$(field '.parameters.alert.rule.description')
+
+log() {
+    jq -nc --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --arg event "$1" --arg ip "$ip" --arg rule "$rule" --arg detail "$2" \
+        '{app: "rayo-ips", ts: $ts, event: $event} + (if $ip == "" then {} else {srcip: $ip} end)
+         + {reason: $rule, detail: $detail}' >> "$LOG"
+}
+
+# Solo direcciones bien formadas: el valor viene de un log que escribe un atacante.
+if printf '%s' "$ip" | grep -Eq '^([0-9]{1,3}\.){3}[0-9]{1,3}$'; then
+    fw=iptables
+elif printf '%s' "$ip" | grep -Eq '^[0-9A-Fa-f:]+$' && [ "${ip#*:}" != "$ip" ]; then
+    fw=ip6tables
+else
+    # No se copia al log: srcip solo lleva direcciones válidas.
+    ip=''
+    [ "$command" = add ] && log bloqueo_omitido "La alerta no trae una IP de origen válida."
+    exit 0
+fi
+
+blocked() { "$fw" -S "$CHAIN" 2>/dev/null | grep -q -- "-s $ip/"; }
+
+case "$command" in
+add)
+    if grep -qxF -- "$ip" "$NO_BLOQUEAR" 2>/dev/null; then
+        log bloqueo_omitido "La IP está en la lista de no bloquear: $description"
+        exit 0
+    fi
+    # Wazuh responde "abort" si esta IP ya tiene un bloqueo en curso: así no se alarga ni se duplica.
+    printf '{"version":1,"origin":{"name":"rayo-bloquear","module":"active-response"},"command":"check_keys","parameters":{"keys":["%s"]}}\n' "$ip"
+    # Aunque responda "abort", la regla pudo borrarse a mano: en ese caso se repone.
+    IFS= read -r reply || true
+    if ! blocked; then
+        "$fw" -I "$CHAIN" -s "$ip" -j DROP || exit 1
+        log ip_bloqueada "$description"
+    fi
+    ;;
+delete)
+    if blocked; then
+        while "$fw" -D "$CHAIN" -s "$ip" -j DROP 2>/dev/null; do :; done
+        log ip_desbloqueada "Venció el bloqueo puesto por la regla $rule."
+    fi
+    ;;
+esac
+exit 0

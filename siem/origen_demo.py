@@ -1,4 +1,8 @@
-"""Origen de pruebas para la demostración: sirve un archivo cacheable en 127.0.0.1:8099."""
+"""Origen de pruebas para la demostración: sirve un archivo cacheable en el puerto 8099.
+
+Escucha en 127.0.0.1, o en la dirección que se pase como argumento (el laboratorio usa 0.0.0.0).
+"""
+import sys
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 BODY = b"console.log('archivo original de la demo');\n" * 50
@@ -17,4 +21,4 @@ class Handler(BaseHTTPRequestHandler):
         pass
 
 
-ThreadingHTTPServer(("127.0.0.1", 8099), Handler).serve_forever()
+ThreadingHTTPServer((sys.argv[1] if len(sys.argv) > 1 else "127.0.0.1", 8099), Handler).serve_forever()

@@ -1,0 +1,10 @@
+# El laboratorio solo necesita el código del proxy y los archivos de siem/lab.
+target/
+data/
+ca/
+logs/
+config.toml
+e2e/
+siem/demo/
+siem/wazuh-docker/
+.git/

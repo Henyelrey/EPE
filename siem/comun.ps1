@@ -14,8 +14,86 @@ $AdminUrl = 'http://127.0.0.1:3191'
 $PanelUrl = 'https://localhost:5601'
 $Origin = 'http://localhost:8099'
 
+# Laboratorio con Suricata y bloqueo automático (siem/lab).
+$LabDir = Join-Path $Siem 'lab'
+$LabNetwork = 'rayo-lab'
+$LabTools = 'rayo-lab-herramientas'
+$Gateway = "$Project-rayo-gateway-1"
+$Suricata = "$Project-rayo-suricata-1"
+
 function Compose {
     & docker compose -p $Project -f (Join-Path $SingleNode 'docker-compose.yml') -f (Join-Path $Siem 'compose.rayo.yml') @args
+}
+
+function ComposeLab {
+    & docker compose -p $Project -f (Join-Path $SingleNode 'docker-compose.yml') -f (Join-Path $Siem 'compose.rayo.yml') `
+        -f (Join-Path $LabDir 'compose.lab.yml') @args
+}
+
+# Descarga Wazuh, genera sus certificados y escribe la configuración del manager. Con -Lab añade la
+# respuesta activa. El manager la lee al arrancar: cambiar de demo lo recrea, y recargar-reglas.ps1 se la
+# aplica sin recrearlo.
+function Initialize-Wazuh([switch]$Lab) {
+    & docker version --format '{{.Server.Version}}' *> $null
+    if ($LASTEXITCODE -ne 0) { Fail 'Docker no responde. Abre Docker Desktop y vuelve a intentarlo.' }
+
+    if (-not (Test-Path $SingleNode)) {
+        Write-Host "Descargando los archivos oficiales de Wazuh $WazuhVersion..."
+        & git -c advice.detachedHead=false clone -q --depth 1 -b $WazuhVersion https://github.com/wazuh/wazuh-docker.git $WazuhDocker
+        if ($LASTEXITCODE -ne 0) { Fail 'No se pudo descargar wazuh-docker.' }
+    }
+
+    foreach ($dir in 'data', 'logs', 'ca') {
+        New-Item -ItemType Directory -Force (Join-Path $Demo $dir) | Out-Null
+    }
+    $config = Join-Path $Demo 'config.toml'
+    if (-not (Test-Path $config)) { Copy-Item (Join-Path $Siem 'demo-proxy.toml') $config }
+
+    # La configuración oficial, con las revisiones de archivos limitadas a los de la demo y el log del proxy.
+    $official = [IO.File]::ReadAllText((Join-Path $SingleNode 'config\wazuh_cluster\wazuh_manager.conf'))
+    $syscheck = [IO.File]::ReadAllText((Join-Path $Siem 'wazuh\rayo-syscheck.xml'))
+    $localfile = [IO.File]::ReadAllText((Join-Path $Siem 'wazuh\rayo-localfile.xml'))
+    $merged = [regex]::Replace($official, '(?s)[ \t]*<syscheck>.*?</syscheck>\r?\n', { param($m) $syscheck }) + "`n" + $localfile
+    # La base de vulnerabilidades ocupa unos 11 GB y esta demo no tiene agentes que analizar.
+    $merged = $merged -replace '(<vulnerability-detection>\s*<enabled>)yes', '$1no'
+    if ($Lab) {
+        # Al recrear el gateway, su agente vuelve a registrarse con el mismo nombre: se reemplaza al anterior.
+        $force = '<force><enabled>yes</enabled><key_mismatch>yes</key_mismatch><disconnected_time enabled="no">1h</disconnected_time><after_registration_time>1s</after_registration_time></force>'
+        $merged = $merged -replace '</auth>', "  $force`n  </auth>"
+        $merged += "`n" + [IO.File]::ReadAllText((Join-Path $Siem 'wazuh\rayo-active-response.xml'))
+    }
+    [IO.File]::WriteAllText((Join-Path $Demo 'ossec.conf'), ($merged -replace "`r`n", "`n"), (New-Object Text.UTF8Encoding $false))
+
+    if (-not (Test-Path (Join-Path $SingleNode 'config\wazuh_indexer_ssl_certs\root-ca.pem'))) {
+        Write-Host 'Generando los certificados internos de Wazuh...'
+        & docker compose -p "$Project-certs" -f (Join-Path $SingleNode 'generate-indexer-certs.yml') run --rm generator *> (Join-Path $Demo 'certs.log')
+        if ($LASTEXITCODE -ne 0) { Fail "No se pudieron generar los certificados. Revisa $Demo\certs.log" }
+    }
+}
+
+function Wait-WazuhPanel {
+    Write-Host 'Esperando al panel de Wazuh. Suele tardar entre 1 y 3 minutos...'
+    foreach ($attempt in 1..80) {
+        $code = & curl.exe -sk -o NUL -w '%{http_code}' --max-time 3 "$PanelUrl/app/login"
+        if ($code -eq '200') { return }
+        Start-Sleep 5
+    }
+    Fail "El panel no respondió a tiempo. Mira los registros con: docker logs $Project-wazuh.dashboard-1"
+}
+
+# Espera hasta que el agente del gateway pueda bloquear (siem/lab/gateway/agente-listo), en pasos de 5 s.
+function Wait-LabAgent($attempts) {
+    foreach ($attempt in 1..$attempts) {
+        & docker exec $Gateway agente-listo 2>$null
+        if ($LASTEXITCODE -eq 0) { return $true }
+        Start-Sleep 5
+    }
+    return $false
+}
+
+# Ejecuta un ataque de siem/lab/herramientas/ataque.sh desde un equipo nuevo con la IP indicada.
+function Invoke-LabAttack($ip, $name) {
+    & docker run --rm --network $LabNetwork --ip $ip $LabTools ataque $name
 }
 
 function Fail($message) {

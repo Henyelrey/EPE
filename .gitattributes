@@ -2,3 +2,5 @@
 *.sh text eol=lf
 # Wazuh lee estas reglas dentro de un contenedor Linux.
 siem/wazuh/* text eol=lf
+# El laboratorio corre en contenedores Linux.
+siem/lab/** text eol=lf

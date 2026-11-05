@@ -213,7 +213,7 @@ Con `security_log_enabled = true`, el proxy escribe `security-AAAA-MM-DD.jsonl` 
 
 La navegación normal no pasa por este log. Nunca incluye tokens, parámetros de la dirección, cookies ni cuerpos. El tope evita que un atacante llene el disco a base de rechazos.
 
-Para verlo en Wazuh, con reglas y simulaciones de ataque, consulta [`siem/README.md`](siem/README.md).
+Para verlo en Wazuh, con reglas y simulaciones de ataque, consulta [`siem/README.md`](siem/README.md). Allí también hay un laboratorio en Docker donde Suricata vigila la red del proxy y Wazuh bloquea a los atacantes con iptables.
 
 ### Log de acceso
 
