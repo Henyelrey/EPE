@@ -19,7 +19,9 @@ function Status {
 $exitCode = 0
 $data = Join-Path $Demo 'data\objects'
 $config = Join-Path $Demo 'config.toml'
-$caKey = Join-Path $Demo 'ca\rayo-ca.key'
+$caKey = Join-Path $Demo 'ca\celeris-ca.key'
+$token = Join-Path $Demo 'ca\admin.token'
+$extraCa = Join-Path $Demo 'ca\simulacion.crt'
 
 Write-Host 'Guardando un archivo en la caché: servirá para el ataque de alteración.'
 $first = Status -x $Proxy "$Origin/static.js"
@@ -59,16 +61,19 @@ Write-Host ''
 Write-Host 'Esperando 40 s para que Wazuh registre el estado original de los archivos...'
 Start-Sleep 40
 
-Attack '7. Alterar archivos críticos en disco' 'T1565.001, T1552.004, T1562.001' 'este equipo'
+Attack '7. Alterar archivos críticos en disco' 'T1565.001, T1552.004, T1562.001, T1098, T1553.004' 'este equipo'
 $object = Get-ChildItem $data -Recurse -File | Where-Object { $_.Extension -ne '.tmp' } | Sort-Object Length -Descending | Select-Object -First 1
 if (-not $object) { Fail 'No hay objetos en la caché: el proxy no guardó el archivo de prueba.' }
 $originalConfig = [IO.File]::ReadAllBytes($config)
 $originalKey = [IO.File]::ReadAllBytes($caKey)
+$originalToken = [IO.File]::ReadAllBytes($token)
 [IO.File]::WriteAllText($object.FullName, "<script>alert('contenido envenenado')</script>")
 Result 'Objeto de la caché sustituido por contenido malicioso.'
 Add-Content $config '# Línea añadida por la simulación'
 Add-Content $caKey '# Línea añadida por la simulación'
-Result 'Configuración y clave de la CA de demostración modificadas.'
+Add-Content $token '# Línea añadida por la simulación'
+Set-Content $extraCa 'Archivo añadido por la simulación'
+Result 'Configuración, clave de la CA y token de demostración modificados. Archivo nuevo en la carpeta de la CA.'
 
 Write-Host '   Esperando 40 s a la siguiente revisión de integridad de Wazuh...'
 Start-Sleep 40
@@ -82,15 +87,34 @@ if (($body -join "`n") -match 'contenido envenenado') {
 
 [IO.File]::WriteAllBytes($config, $originalConfig)
 [IO.File]::WriteAllBytes($caKey, $originalKey)
-Result 'Configuración y clave de demostración restauradas.'
+[IO.File]::WriteAllBytes($token, $originalToken)
+Remove-Item $extraCa
+Result 'Configuración, clave y token de demostración restaurados. Archivo nuevo retirado.'
+
+Attack '8. Sustituir un objeto de la caché en dos pasos' 'T1485, T1565.001' 'este equipo'
+Remove-Item $object.FullName
+Result 'Objeto de la caché borrado.'
+Write-Host '   Esperando 40 s a la siguiente revisión de integridad de Wazuh...'
+Start-Sleep 40
+[IO.File]::WriteAllText($object.FullName, "<script>alert('contenido envenenado')</script>")
+Result 'Objeto recreado con el mismo nombre y contenido malicioso.'
+Write-Host '   Esperando 40 s a la siguiente revisión de integridad de Wazuh...'
+Start-Sleep 40
+
+$body = & curl.exe -s -x $Proxy "$Origin/static.js"
+if (($body -join "`n") -match 'contenido envenenado') {
+    Result 'PROBLEMA: el proxy sirvió el contenido alterado.'
+} else {
+    Result 'El proxy detectó la alteración: descartó la copia y volvió a pedir el original.'
+}
 
 Write-Host ''
 Write-Host 'Esperando 15 s a que las alertas lleguen al panel...'
 Start-Sleep 15
 & (Join-Path $Siem 'ver-alertas.ps1') -Minutos 5
 
-$expected = 100110, 100111, 100120, 100121, 100130, 100131, 100140, 100141, 100150, 100151, 100152, 100160, 100171, 100180, 100182, 100183
-$found = Get-RayoAlerts 5 2000 | ForEach-Object { [int]$_.rule.id }
+$expected = 100110, 100111, 100120, 100121, 100130, 100131, 100140, 100141, 100150, 100151, 100152, 100160, 100171, 100180, 100182, 100183, 100185, 100186, 100187, 100188
+$found = Get-CelerisAlerts 5 2000 | ForEach-Object { [int]$_.rule.id }
 $missing = @($expected | Where-Object { $found -notcontains $_ })
 if ($missing.Count -eq 0) {
     Write-Host "Comprobación: las $($expected.Count) reglas esperadas llegaron al índice de Wazuh." -ForegroundColor Green
@@ -99,5 +123,5 @@ if ($missing.Count -eq 0) {
     $exitCode = 1
 }
 Write-Host ''
-Write-Host "Míralas en el panel: $PanelUrl (Threat Hunting > Events, filtro rule.groups:rayo)"
+Write-Host "Míralas en el panel: $PanelUrl (Threat Hunting > Events, filtro rule.groups:celeris)"
 exit $exitCode

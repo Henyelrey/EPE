@@ -107,7 +107,7 @@ impl SecurityLog {
         if cfg.security_log_retention_days == 0 {
             bail!("security_log_retention_days debe ser al menos 1");
         }
-        let queue = start_writer(&cfg.security_log_dir, FILE_PREFIX, cfg.security_log_retention_days, stats.clone())?;
+        let queue = start_writer(&cfg.security_log_dir, FILE_PREFIX, cfg.security_log_retention_days, true, stats.clone())?;
         Ok(Self { queue: Some(queue), stats, throttle: Mutex::new(Throttle::default()) })
     }
 
@@ -127,7 +127,7 @@ impl SecurityLog {
             return;
         }
         self.write(&Line {
-            app: "rayo-cache",
+            app: "celeris-cache",
             ts: timestamp(secs),
             event: e.event,
             srcip,
@@ -140,7 +140,7 @@ impl SecurityLog {
         });
         if matches!(verdict, Verdict::WriteLast) {
             self.write(&Line {
-                app: "rayo-cache",
+                app: "celeris-cache",
                 ts: timestamp(secs),
                 event: "security_log_throttled",
                 srcip,
@@ -205,7 +205,7 @@ mod tests {
 
     #[test]
     fn apagado_no_crea_nada() {
-        let dir = std::env::temp_dir().join(format!("rayo-sec-off-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("celeris-sec-off-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let cfg = Config { security_log_dir: dir.clone(), ..Config::default() };
         assert!(!cfg.security_log_enabled, "el log de seguridad debe venir apagado");
@@ -215,7 +215,7 @@ mod tests {
 
     #[tokio::test]
     async fn escribe_json_con_lo_que_necesita_un_siem() {
-        let dir = std::env::temp_dir().join(format!("rayo-sec-test-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("celeris-sec-test-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let cfg = Config { security_log_enabled: true, security_log_dir: dir.clone(), ..Config::default() };
         let log = SecurityLog::start(&cfg, Arc::new(Stats::default())).unwrap();
@@ -236,11 +236,19 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
         let line: serde_json::Value = serde_json::from_str(text.trim()).unwrap();
-        assert_eq!(line["app"], "rayo-cache");
+        assert_eq!(line["app"], "celeris-cache");
         assert_eq!(line["event"], "port_blocked");
         assert_eq!(line["srcip"], "192.168.1.10");
         assert_eq!(line["dstport"], 25);
         assert!(line.get("detail").is_none(), "lo que no aplica no se escribe");
+        let tomorrow = dir.join(format!("security-{}.jsonl", crate::access_log::date_string(now() / SECS_PER_DAY + 1)));
+        for _ in 0..100 {
+            if tomorrow.exists() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert_eq!(std::fs::read_to_string(&tomorrow).unwrap(), "", "el archivo de mañana ya existe, vacío, para que el SIEM lo vigile");
         drop(log);
         tokio::time::sleep(Duration::from_millis(50)).await;
         let _ = std::fs::remove_dir_all(&dir);

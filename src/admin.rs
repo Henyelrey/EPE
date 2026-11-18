@@ -1,6 +1,6 @@
 //! Puerto de administración, separado del proxy: panel, métricas, detalle por cliente y registro en vivo.
 //!
-//! No es un host virtual como rayo.stats porque cualquier página abierta en un navegador que use el
+//! No es un host virtual como celeris.stats porque cualquier página abierta en un navegador que use el
 //! proxy puede enviarle peticiones a un host virtual. Aquí todo dato exige un token que una página
 //! ajena no conoce. Sin token solo se obtiene /healthz y el panel vacío, que no contiene ningún dato.
 
@@ -345,7 +345,7 @@ mod tests {
 
     #[test]
     fn crea_el_token_una_vez_y_rechaza_uno_debil() {
-        let dir = std::env::temp_dir().join(format!("rayo-admin-test-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("celeris-admin-test-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let path = dir.join("admin.token");
         let first = load_or_create_token(&path).unwrap();

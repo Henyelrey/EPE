@@ -18,7 +18,7 @@ use x509_parser::extensions::GeneralName;
 use x509_parser::pem::parse_x509_pem;
 
 /// Una restricción vacía equivale a no tener ninguna, así que sin dominios se usa un nombre inexistente.
-const NO_DOMAINS_PLACEHOLDER: &str = "rayo.invalid";
+const NO_DOMAINS_PLACEHOLDER: &str = "celeris.invalid";
 
 pub fn load_or_generate(cert_path: &Path, key_path: &Path, intercept_domains: &[String]) -> anyhow::Result<RcgenAuthority> {
     if !cert_path.exists() || !key_path.exists() {
@@ -98,8 +98,8 @@ fn generate(cert_path: &Path, key_path: &Path, intercept_domains: &[String]) -> 
         excluded_subtrees: vec![],
     });
     let mut dn = DistinguishedName::new();
-    dn.push(DnType::CommonName, "Rayo Cache Local CA");
-    dn.push(DnType::OrganizationName, "rayo-cache (solo uso local)");
+    dn.push(DnType::CommonName, "Celeris Cache Local CA");
+    dn.push(DnType::OrganizationName, "celeris-cache (solo uso local)");
     params.distinguished_name = dn;
     params.not_before = rcgen::date_time_ymd(2026, 1, 1);
     params.not_after = rcgen::date_time_ymd(2028, 12, 31);
@@ -159,7 +159,7 @@ mod tests {
     use super::*;
 
     fn temp_dir(name: &str) -> std::path::PathBuf {
-        let dir = std::env::temp_dir().join(format!("rayo-ca-test-{name}-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("celeris-ca-test-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir

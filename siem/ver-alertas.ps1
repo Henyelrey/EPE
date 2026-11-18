@@ -1,9 +1,9 @@
-﻿# Muestra las alertas de rayo-cache que Wazuh tiene guardadas en su índice.
+﻿# Muestra las alertas de celeris-cache que Wazuh tiene guardadas en su índice.
 param([int]$Minutos = 30, [int]$Limite = 2000)
 . (Join-Path $PSScriptRoot 'comun.ps1')
 
-$alerts = Get-RayoAlerts $Minutos $Limite
-Write-Host "$($alerts.Count) alerta(s) de rayo-cache en los últimos $Minutos minutos, agrupadas por regla y origen:"
+$alerts = Get-CelerisAlerts $Minutos $Limite
+Write-Host "$($alerts.Count) alerta(s) de celeris-cache en los últimos $Minutos minutos, agrupadas por regla y origen:"
 $alerts | Group-Object { "$($_.rule.id)|$($_.data.srcip)" } | ForEach-Object {
     $times = $_.Group | ForEach-Object { [datetime]$_.timestamp } | Sort-Object
     $alert = $_.Group[0]

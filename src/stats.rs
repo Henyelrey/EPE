@@ -1,4 +1,4 @@
-//! Contadores en vivo, expuestos en http://rayo.stats/ y en /metrics del puerto de administración.
+//! Contadores en vivo, expuestos en http://celeris.stats/ y en /metrics del puerto de administración.
 //! Se guardan en disco cada cierto tiempo, salvo los histogramas de latencia, que empiezan de cero al arrancar.
 //!
 //! Con el proxy sin peticiones en curso, se cumple:
@@ -82,14 +82,14 @@ impl Histogram {
             cumulative += self.buckets[i].load(Relaxed);
             let _ = writeln!(
                 out,
-                "rayo_request_duration_seconds_bucket{{result=\"{result}\",le=\"{}\"}} {cumulative}",
+                "celeris_request_duration_seconds_bucket{{result=\"{result}\",le=\"{}\"}} {cumulative}",
                 *ms as f64 / 1000.0
             );
         }
         cumulative += self.buckets[LATENCY_BUCKETS_MS.len()].load(Relaxed);
-        let _ = writeln!(out, "rayo_request_duration_seconds_bucket{{result=\"{result}\",le=\"+Inf\"}} {cumulative}");
-        let _ = writeln!(out, "rayo_request_duration_seconds_sum{{result=\"{result}\"}} {}", self.sum_micros.load(Relaxed) as f64 / 1e6);
-        let _ = writeln!(out, "rayo_request_duration_seconds_count{{result=\"{result}\"}} {cumulative}");
+        let _ = writeln!(out, "celeris_request_duration_seconds_bucket{{result=\"{result}\",le=\"+Inf\"}} {cumulative}");
+        let _ = writeln!(out, "celeris_request_duration_seconds_sum{{result=\"{result}\"}} {}", self.sum_micros.load(Relaxed) as f64 / 1e6);
+        let _ = writeln!(out, "celeris_request_duration_seconds_count{{result=\"{result}\"}} {cumulative}");
     }
 }
 
@@ -167,7 +167,7 @@ pub struct Stats {
     pub latency: Latency,
 }
 
-/// Foto de los contadores. Lo que lleva `serde(skip)` no sale en http://rayo.stats/, que cualquier
+/// Foto de los contadores. Lo que lleva `serde(skip)` no sale en http://celeris.stats/, que cualquier
 /// página abierta en un navegador con el proxy puede pedir: solo se ve en /metrics, con token.
 #[derive(Serialize)]
 pub struct Snapshot {
@@ -451,13 +451,13 @@ impl Stats {
     pub fn prometheus(&self) -> String {
         let s = self.snapshot();
         let mut out = String::new();
-        single(&mut out, "rayo_uptime_seconds", "gauge", "Segundos desde que arrancó el proxy.", s.uptime_secs);
-        single(&mut out, "rayo_requests_total", "counter", "Peticiones de contenido recibidas.", s.requests);
-        single(&mut out, "rayo_request_hit_ratio", "gauge", "Parte de las peticiones servidas desde una copia.", s.request_hit_ratio);
-        single(&mut out, "rayo_byte_hit_ratio", "gauge", "Parte de los bytes servidos desde una copia. No incluye túneles.", s.byte_hit_ratio);
+        single(&mut out, "celeris_uptime_seconds", "gauge", "Segundos desde que arrancó el proxy.", s.uptime_secs);
+        single(&mut out, "celeris_requests_total", "counter", "Peticiones de contenido recibidas.", s.requests);
+        single(&mut out, "celeris_request_hit_ratio", "gauge", "Parte de las peticiones servidas desde una copia.", s.request_hit_ratio);
+        single(&mut out, "celeris_byte_hit_ratio", "gauge", "Parte de los bytes servidos desde una copia. No incluye túneles.", s.byte_hit_ratio);
         labeled(
             &mut out,
-            "rayo_results_total",
+            "celeris_results_total",
             "Peticiones de contenido por resultado.",
             "result",
             &[
@@ -471,35 +471,35 @@ impl Stats {
         );
         labeled(
             &mut out,
-            "rayo_bytes_total",
+            "celeris_bytes_total",
             "Bytes entregados a los clientes por procedencia. No incluye túneles.",
             "source",
             &[("cache", s.bytes_from_cache), ("origin", s.bytes_from_origin), ("bypass", s.bytes_bypass)],
         );
         labeled(
             &mut out,
-            "rayo_stored_objects_total",
+            "celeris_stored_objects_total",
             "Respuestas guardadas en disco.",
             "kind",
             &[("new", s.stored_new_objects), ("deduplicated", s.deduplicated_objects)],
         );
         labeled(
             &mut out,
-            "rayo_tls_connections_total",
+            "celeris_tls_connections_total",
             "Conexiones por decisión de intercepción.",
             "mode",
             &[("intercepted", s.tls_intercepted), ("passthrough", s.tls_passthrough)],
         );
         labeled(
             &mut out,
-            "rayo_rejections_total",
+            "celeris_rejections_total",
             "Peticiones rechazadas por motivo.",
             "reason",
             &[("client", s.denied_clients), ("rate_limit", s.rate_limited), ("destination", s.blocked_destinations), ("port", s.blocked_ports)],
         );
         labeled(
             &mut out,
-            "rayo_detections_total",
+            "celeris_detections_total",
             "Avisos de actividad inusual por tipo.",
             "kind",
             &[
@@ -509,21 +509,21 @@ impl Stats {
                 ("host_mismatch", s.detections_host_mismatch),
             ],
         );
-        single(&mut out, "rayo_over_budget_total", "counter", "Peticiones atendidas sin caché por falta de memoria.", s.over_budget);
-        single(&mut out, "rayo_coalesced_total", "counter", "Peticiones que esperaron a otra igual.", s.coalesced);
-        single(&mut out, "rayo_corrupt_objects_total", "counter", "Objetos descartados por no pasar la verificación de integridad.", s.corrupt_objects);
-        single(&mut out, "rayo_store_write_errors_total", "counter", "Respuestas que no se pudieron guardar en disco.", s.store_write_errors);
-        single(&mut out, "rayo_access_log_dropped_total", "counter", "Líneas del log de acceso perdidas por saturación.", s.access_log_dropped);
-        single(&mut out, "rayo_access_log_errors_total", "counter", "Errores al escribir el log de acceso.", s.access_log_errors);
-        single(&mut out, "rayo_disk_used_bytes", "gauge", "Bytes de objetos y metadatos de la caché.", s.disk_used_bytes);
-        single(&mut out, "rayo_disk_objects", "gauge", "Objetos de la caché en disco.", s.disk_objects);
-        single(&mut out, "rayo_disk_limit_bytes", "gauge", "Límite de la caché en disco (0 = sin límite).", s.disk_limit_bytes);
-        single(&mut out, "rayo_disk_free_bytes", "gauge", "Espacio libre del volumen de la caché.", s.disk_free_bytes);
-        single(&mut out, "rayo_disk_total_bytes", "gauge", "Tamaño del volumen de la caché.", s.disk_total_bytes);
-        single(&mut out, "rayo_evicted_entries_total", "counter", "Entradas expulsadas por el límite de disco.", s.evicted_entries);
-        single(&mut out, "rayo_evicted_bytes_total", "counter", "Bytes liberados por el límite de disco.", s.evicted_bytes);
+        single(&mut out, "celeris_over_budget_total", "counter", "Peticiones atendidas sin caché por falta de memoria.", s.over_budget);
+        single(&mut out, "celeris_coalesced_total", "counter", "Peticiones que esperaron a otra igual.", s.coalesced);
+        single(&mut out, "celeris_corrupt_objects_total", "counter", "Objetos descartados por no pasar la verificación de integridad.", s.corrupt_objects);
+        single(&mut out, "celeris_store_write_errors_total", "counter", "Respuestas que no se pudieron guardar en disco.", s.store_write_errors);
+        single(&mut out, "celeris_access_log_dropped_total", "counter", "Líneas del log de acceso perdidas por saturación.", s.access_log_dropped);
+        single(&mut out, "celeris_access_log_errors_total", "counter", "Errores al escribir el log de acceso.", s.access_log_errors);
+        single(&mut out, "celeris_disk_used_bytes", "gauge", "Bytes de objetos y metadatos de la caché.", s.disk_used_bytes);
+        single(&mut out, "celeris_disk_objects", "gauge", "Objetos de la caché en disco.", s.disk_objects);
+        single(&mut out, "celeris_disk_limit_bytes", "gauge", "Límite de la caché en disco (0 = sin límite).", s.disk_limit_bytes);
+        single(&mut out, "celeris_disk_free_bytes", "gauge", "Espacio libre del volumen de la caché.", s.disk_free_bytes);
+        single(&mut out, "celeris_disk_total_bytes", "gauge", "Tamaño del volumen de la caché.", s.disk_total_bytes);
+        single(&mut out, "celeris_evicted_entries_total", "counter", "Entradas expulsadas por el límite de disco.", s.evicted_entries);
+        single(&mut out, "celeris_evicted_bytes_total", "counter", "Bytes liberados por el límite de disco.", s.evicted_bytes);
 
-        help_and_type(&mut out, "rayo_request_duration_seconds", "histogram", "Tiempo hasta tener lista la respuesta, por resultado.");
+        help_and_type(&mut out, "celeris_request_duration_seconds", "histogram", "Tiempo hasta tener lista la respuesta, por resultado.");
         self.latency.hit.write_prometheus(&mut out, "hit");
         self.latency.revalidated.write_prometheus(&mut out, "revalidated");
         self.latency.miss.write_prometheus(&mut out, "miss");
@@ -565,19 +565,19 @@ mod tests {
         s.observe(Outcome::Hit, Duration::from_secs(60));
         s.observe(Outcome::Blocked, Duration::from_secs(1));
         let text = s.prometheus();
-        assert!(text.contains("rayo_request_duration_seconds_bucket{result=\"hit\",le=\"0.001\"} 1\n"));
-        assert!(text.contains("rayo_request_duration_seconds_bucket{result=\"hit\",le=\"0.005\"} 2\n"));
-        assert!(text.contains("rayo_request_duration_seconds_bucket{result=\"hit\",le=\"10\"} 2\n"));
-        assert!(text.contains("rayo_request_duration_seconds_bucket{result=\"hit\",le=\"+Inf\"} 3\n"));
-        assert!(text.contains("rayo_request_duration_seconds_count{result=\"hit\"} 3\n"));
-        assert!(text.contains("rayo_request_duration_seconds_count{result=\"miss\"} 0\n"));
+        assert!(text.contains("celeris_request_duration_seconds_bucket{result=\"hit\",le=\"0.001\"} 1\n"));
+        assert!(text.contains("celeris_request_duration_seconds_bucket{result=\"hit\",le=\"0.005\"} 2\n"));
+        assert!(text.contains("celeris_request_duration_seconds_bucket{result=\"hit\",le=\"10\"} 2\n"));
+        assert!(text.contains("celeris_request_duration_seconds_bucket{result=\"hit\",le=\"+Inf\"} 3\n"));
+        assert!(text.contains("celeris_request_duration_seconds_count{result=\"hit\"} 3\n"));
+        assert!(text.contains("celeris_request_duration_seconds_count{result=\"miss\"} 0\n"));
     }
 
     #[test]
     fn las_estadisticas_publicas_no_crecen() {
         let json = serde_json::to_value(Stats::default().snapshot()).unwrap();
         for private in ["uptime_secs", "request_hit_ratio", "corrupt_objects", "store_write_errors", "disk_used_bytes", "disk_objects", "disk_limit_bytes", "disk_free_bytes", "evicted_entries", "since"] {
-            assert!(json.get(private).is_none(), "{private} no debe salir en rayo.stats");
+            assert!(json.get(private).is_none(), "{private} no debe salir en celeris.stats");
         }
         assert!(json.get("requests").is_some());
     }

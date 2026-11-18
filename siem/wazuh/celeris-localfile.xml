@@ -1,0 +1,17 @@
+<ossec_config>
+  <localfile>
+    <log_format>json</log_format>
+    <location>/var/celeris/logs/security-*.jsonl</location>
+    <only-future-events>no</only-future-events>
+  </localfile>
+  <localfile>
+    <log_format>apache</log_format>
+    <location>/var/celeris/logs/apache-access.log</location>
+    <only-future-events>no</only-future-events>
+  </localfile>
+  <localfile>
+    <log_format>json</log_format>
+    <location>/var/celeris/logs/firewall.jsonl</location>
+    <only-future-events>no</only-future-events>
+  </localfile>
+</ossec_config>

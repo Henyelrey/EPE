@@ -3,7 +3,7 @@
 
 const REFRESH_MS = 5000;
 const LOG_REFRESH_MS = 3000;
-const TOKEN_KEY = "rayo-admin-token";
+const TOKEN_KEY = "celeris-admin-token";
 
 const ALERT_INFO = {
   disk_space: { title: "Poco espacio en el volumen", severity: "critical" },
@@ -532,7 +532,7 @@ function showLogin(message) {
   $("dashboard").hidden = true;
   $("log-view").hidden = true;
   $("sidebar").hidden = true;
-  $("page-title").textContent = "Panel de rayo-cache";
+  $("page-title").textContent = "Panel de celeris-cache";
   $("logout").hidden = true;
   $("freshness").textContent = "";
   $("login").hidden = false;

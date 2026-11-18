@@ -1,10 +1,10 @@
-# rayo-cache
+# celeris-cache
 
 Proxy de caché HTTP/HTTPS **local**, escrito en Rust con **Hudsucker + rustls + Hyper + Tokio**.
 Es la versión honesta de la idea del *HTTPS Reflector*: en vez de rebajar HTTPS a HTTP, descifra
 TLS solo para los dominios que tú eliges, usando una CA que **tú instalas en tus propios dispositivos**.
 
-> Nombre provisional. "ThunderCache" ya es una marca comercial de BMSoftware.
+> Inspirado en las ideas de ThunderCache (marca de BMSoftware), sin relación con ese producto.
 
 ## Glosario
 
@@ -21,7 +21,7 @@ TLS solo para los dominios que tú eliges, usando una CA que **tú instalas en t
 ## Qué hace
 
 ```
-Navegador ──CONNECT host:443──▶ rayo-cache
+Navegador ──CONNECT host:443──▶ celeris-cache
                                   │ ¿host en intercept_domains y no en never_intercept?
                                   ├─ NO  → túnel cifrado (passthrough)
                                   └─ SÍ  → TLS con cert de la CA local
@@ -52,25 +52,25 @@ Reglas de seguridad incluidas:
 
 ```bash
 cargo build --release
-# binario: target/release/rayo-cache
+# binario: target/release/celeris-cache
 ```
 
 ## Usar
 
 1. **Arranca** (crea `config.toml` y la CA en `ca/` si no existen):
    ```bash
-   ./target/release/rayo-cache            # o: rayo-cache ruta/config.toml
+   ./target/release/celeris-cache            # o: celeris-cache ruta/config.toml
    ```
 2. **Edita `config.toml`**: pon en `intercept_domains` solo contenido público y pesado (CDNs, descargas, fuentes). Mantén bancos y logins en `never_intercept`.
-3. **Instala `ca/rayo-ca.crt`** en tus dispositivos:
-   - **CachyOS / Arch:** `sudo trust anchor --store ca/rayo-ca.crt`
-   - **Debian / Ubuntu:** `sudo cp ca/rayo-ca.crt /usr/local/share/ca-certificates/ && sudo update-ca-certificates`
-   - **Windows (PowerShell admin):** `certutil -addstore -f ROOT ca\rayo-ca.crt`
+3. **Instala `ca/celeris-ca.crt`** en tus dispositivos:
+   - **CachyOS / Arch:** `sudo trust anchor --store ca/celeris-ca.crt`
+   - **Debian / Ubuntu:** `sudo cp ca/celeris-ca.crt /usr/local/share/ca-certificates/ && sudo update-ca-certificates`
+   - **Windows (PowerShell admin):** `certutil -addstore -f ROOT ca\celeris-ca.crt`
    - **Firefox** usa su propio almacén: Ajustes → Privacidad y seguridad → Certificados → Importar.
 4. **Configura el proxy** `127.0.0.1:3128` para HTTP y HTTPS (navegador o sistema).
-5. **Mira las estadísticas** en `http://rayo.stats/` y el aviso para usuarios en `http://rayo.aviso/` (con el proxy activo). Escribe `http://` completo: los navegadores tratan esos nombres como búsquedas y no existen por HTTPS.
+5. **Mira las estadísticas** en `http://celeris.stats/` y el aviso para usuarios en `http://celeris.aviso/` (con el proxy activo). Escribe `http://` completo: los navegadores tratan esos nombres como búsquedas y no existen por HTTPS.
 
-`RUST_LOG=rayo_cache=debug` muestra cada decisión de intercepción. Ese modo y filtros como `RUST_LOG=info` pueden escribir en el registro la IP de los clientes y los dominios a los que se conectan; si los usas, el aviso de `http://rayo.aviso/` lo indica. El registro nunca incluye los parámetros de las URLs, porque pueden contener tokens.
+`RUST_LOG=celeris_cache=debug` muestra cada decisión de intercepción. Ese modo y filtros como `RUST_LOG=info` pueden escribir en el registro la IP de los clientes y los dominios a los que se conectan; si los usas, el aviso de `http://celeris.aviso/` lo indica. El registro nunca incluye los parámetros de las URLs, porque pueden contener tokens.
 
 ### Usarlo en una red compartida
 
@@ -84,8 +84,8 @@ Por defecto solo acepta conexiones de este mismo equipo. Para abrirlo a tu red:
    ```
    El proxy no arranca si `listen` no es local y `allowed_clients` solo permite este equipo, ni si incluye a todo Internet (`0.0.0.0/0`). La IP no identifica a una persona: cualquiera dentro de la subred puede usarlo.
 3. **Si necesitan llegar a una intranet** a través del proxy, agrega sus redes a `allowed_internal_networks`. Todo lo interno está bloqueado por defecto.
-4. **Si generaste una CA con una versión anterior,** el proxy avisa al arrancar de que no tiene límites. Bórrala de cada dispositivo (en Windows: `certutil -delstore ROOT "Rayo Cache Local CA"`), borra `ca/`, arranca para generar otra y reinstálala.
-5. **Avisa a los usuarios antes de que instalen la CA.** Completa `operator_contact` en `config.toml` y entrega la plantilla [docs/AVISO.md](docs/AVISO.md). Cualquier cliente permitido puede comprobar en `http://rayo.aviso/` los dominios que se descifran, qué registros están activos y la huella del certificado. La página se genera con la configuración real al arrancar.
+4. **Si generaste una CA con una versión anterior,** el proxy avisa al arrancar de que no tiene límites. Bórrala de cada dispositivo (en Windows: `certutil -delstore ROOT "Celeris Cache Local CA"`), borra `ca/`, arranca para generar otra y reinstálala.
+5. **Avisa a los usuarios antes de que instalen la CA.** Completa `operator_contact` en `config.toml` y entrega la plantilla [docs/AVISO.md](docs/AVISO.md). Cualquier cliente permitido puede comprobar en `http://celeris.aviso/` los dominios que se descifran, qué registros están activos y la huella del certificado. La página se genera con la configuración real al arrancar.
 
 **Puertos.** Un túnel a un puerto que no esté en `allowed_connect_ports` recibe un 403. Si alguien necesita otro, como el 8443 o el 22, agrégalo a la lista; dejarla vacía permite cualquier puerto y el proxy lo advierte al arrancar. El límite solo aplica a `CONNECT`: una petición `http://` sin cifrar puede seguir dirigiéndose a cualquier puerto público.
 
@@ -116,12 +116,12 @@ Abre `http://127.0.0.1:9128/` y pega el token. La barra lateral tiene dos vistas
 
 Sin token, la página se sirve vacía: **todos los datos lo exigen**. El token se crea al arrancar en `admin_token_file` (`ca/admin.token`), con acceso solo para el usuario que ejecuta el proxy. Para cambiarlo, bórralo y reinicia. El panel lo guarda solo en esa pestaña y lo olvida al pulsar «Salir». Si escuchas fuera de `127.0.0.1`, el token viaja sin cifrar por esa red: el proxy lo advierte al arrancar.
 
-**Por cliente.** Con `client_stats_enabled = true`, el panel lista cada IP con sus peticiones, bytes, túneles y rechazos, pero no qué sitios visitó. Viene apagado porque son datos sobre personas, y el aviso de `http://rayo.aviso/` indica si está activo. Solo vive en memoria y se olvida tras un día sin actividad o al reiniciar. Guarda hasta 4096 clientes: los que no quepan no se cuentan hasta que se olvide alguno.
+**Por cliente.** Con `client_stats_enabled = true`, el panel lista cada IP con sus peticiones, bytes, túneles y rechazos, pero no qué sitios visitó. Viene apagado porque son datos sobre personas, y el aviso de `http://celeris.aviso/` indica si está activo. Solo vive en memoria y se olvida tras un día sin actividad o al reiniciar. Guarda hasta 4096 clientes: los que no quepan no se cuentan hasta que se olvide alguno.
 
 **Registro en vivo.** Una gráfica de tráfico de los últimos 5 minutos y una tabla con las últimas peticiones, que se puede filtrar y pausar.
 
 - La gráfica está siempre disponible, porque solo usa totales generales. No incluye las conexiones sin descifrar: el proxy no conoce su tamaño.
-- La tabla se activa con `live_log_enabled = true`. Viene apagada porque muestra qué dominios pide cada equipo, y el aviso de `http://rayo.aviso/` indica si está activa.
+- La tabla se activa con `live_log_enabled = true`. Viene apagada porque muestra qué dominios pide cada equipo, y el aviso de `http://celeris.aviso/` indica si está activa.
 - `live_log_client` decide cómo aparece el cliente: `"pseudonym"` (por defecto), un identificador que cambia cada día; `"ip"`, su IP real; o `"none"`, nada.
 - Guarda las últimas 1000 entradas solo en memoria, y se olvidan tras un día o al reiniciar. Como en el log de acceso, nunca hay parámetros de la dirección, y la ruta solo aparece en contenido servido desde una copia o guardado.
 
@@ -129,7 +129,7 @@ Si usas `"ip"` en una red compartida, revisa con quien corresponda si puedes mos
 
 ### Alertas
 
-Se evalúan cada `maintenance_interval_secs` (por defecto 60). Se ven en el panel y como `rayo_alert{name="..."}` en `/metrics`, y dejan una línea en el registro al activarse y al apagarse. El proxy no envía avisos por su cuenta: para recibirlos, configura una regla en Prometheus.
+Se evalúan cada `maintenance_interval_secs` (por defecto 60). Se ven en el panel y como `celeris_alert{name="..."}` en `/metrics`, y dejan una línea en el registro al activarse y al apagarse. El proxy no envía avisos por su cuenta: para recibirlos, configura una regla en Prometheus.
 
 | `name` | Se activa cuando |
 |---|---|
@@ -143,7 +143,7 @@ Se evalúan cada `maintenance_interval_secs` (por defecto 60). Se ven en el pane
 
 ### Detecciones
 
-Avisan de actividad inusual por IP, pero no bloquean nada: la IP señala un equipo y no a una persona, y un volumen alto puede ser una actualización legítima. Vienen activas (`detections_enabled`), y el aviso de `http://rayo.aviso/` lo indica.
+Avisan de actividad inusual por IP, pero no bloquean nada: la IP señala un equipo y no a una persona, y un volumen alto puede ser una actualización legítima. Vienen activas (`detections_enabled`), y el aviso de `http://celeris.aviso/` lo indica.
 
 | Aviso | Se anota cuando | Umbral |
 |---|---|---|
@@ -160,7 +160,7 @@ Lo que no pueden ver:
 - **Ráfagas entre dos minutos:** se cuenta por minuto de reloj, así que una ráfaga repartida entre dos minutos puede no llegar al umbral.
 - **Muchas direcciones:** en cada minuto se siguen hasta 4096 IPs; las que no quepan no se cuentan hasta el minuto siguiente.
 
-Un `Host` falso no cambia el destino ni la clave de caché, que salen de la URI. Para llevar esto a un SIEM, usa `rayo_detections_total` en `/metrics` y el log de acceso en JSONL, que registra los túneles rechazados con su puerto.
+Un `Host` falso no cambia el destino ni la clave de caché, que salen de la URI. Para llevar esto a un SIEM, usa `celeris_detections_total` en `/metrics` y el log de acceso en JSONL, que registra los túneles rechazados con su puerto.
 
 ### Métricas para Prometheus
 
@@ -172,32 +172,32 @@ curl -H "Authorization: Bearer $(cat ca/admin.token)" http://127.0.0.1:9128/metr
 ```yaml
 # prometheus.yml
 scrape_configs:
-  - job_name: rayo-cache
+  - job_name: celeris-cache
     authorization:
       credentials_file: /ruta/a/ca/admin.token
     static_configs:
       - targets: ["127.0.0.1:9128"]
 ```
 
-Además de los contadores de arriba, `/metrics` incluye lo que no se publica en `http://rayo.stats/`:
+Además de los contadores de arriba, `/metrics` incluye lo que no se publica en `http://celeris.stats/`:
 
 | Métrica | Qué mide |
 |---|---|
-| `rayo_request_hit_ratio`, `rayo_byte_hit_ratio` | Parte de las peticiones y de los bytes servidos desde una copia. |
-| `rayo_request_duration_seconds{result}` | Histograma del tiempo hasta tener lista la respuesta, desde el último arranque. En `hit`, `miss` y `revalidated` incluye leer o descargar el cuerpo, pero no enviarlo al cliente. En `bypass` termina al empezar a reenviar, así que no mide la descarga. |
-| `rayo_corrupt_objects_total`, `rayo_store_write_errors_total` | Objetos descartados por no coincidir con su hash y respuestas que no se pudieron guardar. |
-| `rayo_disk_used_bytes`, `rayo_disk_limit_bytes`, `rayo_disk_objects` | Lo que ocupa la caché, su límite y cuántos objetos tiene. |
-| `rayo_disk_free_bytes`, `rayo_disk_total_bytes` | Espacio del volumen, medido cada `maintenance_interval_secs`. |
-| `rayo_evicted_entries_total`, `rayo_evicted_bytes_total` | Lo expulsado por el límite de disco. |
-| `rayo_detections_total{kind}` | Avisos de actividad inusual por tipo (`volume`, `denied`, `rare_port`, `host_mismatch`), sin IP. |
-| `rayo_rejections_total{reason="port"}` | Túneles rechazados por pedir un puerto no permitido. No se publica en `http://rayo.stats/`. |
-| `rayo_alert{name}`, `rayo_ca_not_after_seconds` | Si cada alerta está activa, y cuándo vence la CA. |
-| `rayo_access_log_dropped_total`, `rayo_access_log_errors_total` | Líneas perdidas del log de acceso y errores al escribirlo. |
-| `rayo_uptime_seconds` | Tiempo desde el arranque. |
+| `celeris_request_hit_ratio`, `celeris_byte_hit_ratio` | Parte de las peticiones y de los bytes servidos desde una copia. |
+| `celeris_request_duration_seconds{result}` | Histograma del tiempo hasta tener lista la respuesta, desde el último arranque. En `hit`, `miss` y `revalidated` incluye leer o descargar el cuerpo, pero no enviarlo al cliente. En `bypass` termina al empezar a reenviar, así que no mide la descarga. |
+| `celeris_corrupt_objects_total`, `celeris_store_write_errors_total` | Objetos descartados por no coincidir con su hash y respuestas que no se pudieron guardar. |
+| `celeris_disk_used_bytes`, `celeris_disk_limit_bytes`, `celeris_disk_objects` | Lo que ocupa la caché, su límite y cuántos objetos tiene. |
+| `celeris_disk_free_bytes`, `celeris_disk_total_bytes` | Espacio del volumen, medido cada `maintenance_interval_secs`. |
+| `celeris_evicted_entries_total`, `celeris_evicted_bytes_total` | Lo expulsado por el límite de disco. |
+| `celeris_detections_total{kind}` | Avisos de actividad inusual por tipo (`volume`, `denied`, `rare_port`, `host_mismatch`), sin IP. |
+| `celeris_rejections_total{reason="port"}` | Túneles rechazados por pedir un puerto no permitido. No se publica en `http://celeris.stats/`. |
+| `celeris_alert{name}`, `celeris_ca_not_after_seconds` | Si cada alerta está activa, y cuándo vence la CA. |
+| `celeris_access_log_dropped_total`, `celeris_access_log_errors_total` | Líneas perdidas del log de acceso y errores al escribirlo. |
+| `celeris_uptime_seconds` | Tiempo desde el arranque. |
 
 ### Log de seguridad para un SIEM
 
-Con `security_log_enabled = true`, el proxy escribe `security-AAAA-MM-DD.jsonl` en `security_log_dir` y lo conserva `security_log_retention_days` días (30 por defecto). Viene apagado porque guarda la IP real, y el aviso de `http://rayo.aviso/` indica si está activo.
+Con `security_log_enabled = true`, el proxy escribe `security-AAAA-MM-DD.jsonl` en `security_log_dir` y lo conserva `security_log_retention_days` días (30 por defecto). Viene apagado porque guarda la IP real, y el aviso de `http://celeris.aviso/` indica si está activo. El archivo del día siguiente ya existe, vacío, para que el SIEM lo vigile antes de que llegue su primera línea.
 
 | `event` | Qué ocurrió |
 |---|---|
@@ -217,7 +217,7 @@ Para verlo en Wazuh, con reglas y simulaciones de ataque, consulta [`siem/README
 
 ### Log de acceso
 
-Viene **apagado**: anota qué dominios visita cada dispositivo. Antes de activarlo, avisa a los usuarios: `http://rayo.aviso/` lo muestra por sí solo, pero también hay que actualizar la hoja de [docs/AVISO.md](docs/AVISO.md).
+Viene **apagado**: anota qué dominios visita cada dispositivo. Antes de activarlo, avisa a los usuarios: `http://celeris.aviso/` lo muestra por sí solo, pero también hay que actualizar la hoja de [docs/AVISO.md](docs/AVISO.md).
 
 ```toml
 access_log_enabled = true
@@ -239,9 +239,9 @@ Escribe un archivo JSONL por día (UTC), `access-AAAA-MM-DD.jsonl`, que solo pue
 - **`bytes`:** lo que el proxy envió. Si el cliente se desconecta a medias, puede ser más de lo que recibió. Es `null` si no se puede saber, como en los túneles.
 - **Nunca incluye** parámetros de la URL, cookies, credenciales ni cuerpos.
 - **Túneles:** se anota que se abrió uno, con su dominio y puerto. Hudsucker no expone cuántos bytes pasan ni cuánto dura.
-- **No se anotan** los clientes rechazados o limitados: solo se cuentan. Tampoco las visitas a `rayo.stats` y `rayo.aviso`.
+- **No se anotan** los clientes rechazados o limitados: solo se cuentan. Tampoco las visitas a `celeris.stats` y `celeris.aviso`.
 
-Escribir nunca retrasa una petición: si el disco no da abasto, se pierden líneas y `rayo_access_log_dropped_total` lo indica. Puedes enviar estos archivos a un SIEM con cualquier agente que lea JSONL.
+Escribir nunca retrasa una petición: si el disco no da abasto, se pierden líneas y `celeris_access_log_dropped_total` lo indica. Puedes enviar estos archivos a un SIEM con cualquier agente que lea JSONL.
 
 ## Probar
 
@@ -258,7 +258,7 @@ El e2e verifica, entre otras cosas, que 20 peticiones simultáneas a un objeto n
 ## Uso responsable
 
 La CA permite leer el tráfico de los dominios listados. Úsala **solo en tus equipos o en una red de
-laboratorio donde todos los usuarios lo sepan y lo acepten**. La llave `ca/rayo-ca.key` nunca debe
+laboratorio donde todos los usuarios lo sepan y lo acepten**. La llave `ca/celeris-ca.key` nunca debe
 salir de la máquina del proxy. Las apps con *certificate pinning* (bancos, muchas apps móviles)
 fallarán si se interceptan: van en `never_intercept`.
 

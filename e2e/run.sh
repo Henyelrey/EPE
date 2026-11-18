@@ -3,10 +3,10 @@
 # Requiere: openssl, python3 y curl. No hace falta tocar el archivo hosts: usa localhost (se intercepta)
 # y 127.0.0.1 (no se intercepta). Sale con código 1 si alguna verificación falla.
 #
-# Uso:  ./e2e/run.sh                         prueba target/release/rayo-cache
-#       RAYO_BIN=ruta/al/binario ./e2e/run.sh  prueba otro binario
+# Uso:  ./e2e/run.sh                         prueba target/release/celeris-cache
+#       CELERIS_BIN=ruta/al/binario ./e2e/run.sh  prueba otro binario
 cd "$(dirname "$0")" || exit 1
-BIN="${RAYO_BIN:-../target/release/rayo-cache}"
+BIN="${CELERIS_BIN:-../target/release/celeris-cache}"
 PX=http://127.0.0.1:3129
 ORIGIN_HTTP=http://127.0.0.1:8080
 L=https://localhost:8443
@@ -38,8 +38,8 @@ allowed_internal_networks = $internal
 allowed_connect_ports = ${PORTS:-[80, 443, 8443]}
 max_buffered_bytes = ${BUDGET:-67108864}
 data_dir = "./data-$1"
-ca_cert = "./ca/rayo-ca.crt"
-ca_key = "./ca/rayo-ca.key"
+ca_cert = "./ca/celeris-ca.crt"
+ca_key = "./ca/celeris-ca.key"
 max_object_bytes = 1048576
 default_ttl_secs = 3600
 mem_index_entries = 10000
@@ -49,7 +49,7 @@ never_intercept = ["127.0.0.1"]
 strip_query_params = ["fbclid"]
 strip_query_prefixes = ["utm_"]
 store_id = []
-stats_host = "rayo.stats"
+stats_host = "celeris.stats"
 upstream_extra_ca = ["./origin-ca.pem"]
 admin_listen = "${ADMIN:-}"
 admin_token_file = "${ADMIN_TOKEN:-./ca/admin.token}"
@@ -79,7 +79,7 @@ launch_proxy() {
   "$BIN" "config.$1.toml" >> "$1.log" 2>&1 &
   PIDS+=($!)
   for _ in $(seq 1 50); do
-    curl -s --noproxy "" -x "http://127.0.0.1:$2" http://rayo.stats/ >/dev/null && return
+    curl -s --noproxy "" -x "http://127.0.0.1:$2" http://celeris.stats/ >/dev/null && return
     sleep 0.2
   done
 }
@@ -99,7 +99,7 @@ CLIENTS='["192.0.2.0/24"]' start_proxy denied 3130
 RATE=5 start_proxy limited 3131
 INTERNAL='[]' start_proxy strict 3132
 DOMAINS='[]' BUDGET=1024 start_proxy tight 3133
-RUST_LOG=rayo_cache=debug CONTACT='<script>alert(1)</script>' start_proxy detailed 3134
+RUST_LOG=celeris_cache=debug CONTACT='<script>alert(1)</script>' start_proxy detailed 3134
 RUST_LOG=info start_proxy verbose 3135
 ADMIN=127.0.0.1:3137 LOG_ENABLED=true start_proxy observed 3136
 LOG_ENABLED=true LOG_IP=none LOG_DAYS=3 start_proxy anon 3139
@@ -116,22 +116,23 @@ ADMIN=127.0.0.1:3157 LIVE=true start_proxy livehidden 3156
 ADMIN=127.0.0.1:3159 SECURITY=true ALERT_CA_DAYS=5000 DETECT_DENIED=3 start_proxy secured 3158
 SECURITY=true CLIENTS='["192.0.2.0/24"]' start_proxy secdenied 3160
 SECURITY=true RATE=2 start_proxy secrate 3161
+SECURITY=true INTERNAL='[]' start_proxy secclosed 3162
 
 FAILS=0
 expect() { # descripción, esperado, obtenido
   if [ "$2" = "$3" ]; then echo "  ok    $1"; else echo "  FALLA $1: esperaba '$2', obtuve '$3'"; FAILS=$((FAILS + 1)); fi
 }
 section() { echo; echo "$1"; }
-curlx() { curl -s -g --ssl-no-revoke --noproxy "" -x "$PX" --cacert ca/rayo-ca.crt -H "Accept-Encoding: gzip" "$@"; }
-# Devuelve "<estado> <x-rayo-cache>", con "-" si la respuesta no pasó por la caché.
-px() { curlx -o /dev/null -D - "$@" | tr -d '\r' | awk '/^HTTP/{s=$2} tolower($1)=="x-rayo-cache:"{c=$2} END{print s, (c?c:"-")}'; }
+curlx() { curl -s -g --ssl-no-revoke --noproxy "" -x "$PX" --cacert ca/celeris-ca.crt -H "Accept-Encoding: gzip" "$@"; }
+# Devuelve "<estado> <x-celeris-cache>", con "-" si la respuesta no pasó por la caché.
+px() { curlx -o /dev/null -D - "$@" | tr -d '\r' | awk '/^HTTP/{s=$2} tolower($1)=="x-celeris-cache:"{c=$2} END{print s, (c?c:"-")}'; }
 body() { curlx "$@"; }
-metric() { curl -s --noproxy "" -x "$PX" http://rayo.stats/ | python3 -c "import json,sys; print(json.load(sys.stdin).get(sys.argv[1], 'ausente'))" "$1"; }
+metric() { curl -s --noproxy "" -x "$PX" http://celeris.stats/ | python3 -c "import json,sys; print(json.load(sys.stdin).get(sys.argv[1], 'ausente'))" "$1"; }
 sha() { sha256sum | cut -d' ' -f1; }
 # Ruta en disco del objeto cuyo contenido es el que el origen entrega hoy en esa URL.
 object_path() { local h; h=$(curl -s --noproxy "*" "$ORIGIN_HTTP$1" | sha); echo "data-e2e/objects/${h:0:2}/$h"; }
 # Emisor del certificado que recibe un cliente que conecta a $1 con SNI $2.
-issuer() { echo Q | timeout 10 openssl s_client -proxy "${PX#http://}" -connect "$1" -servername "$2" 2>/dev/null | grep -o -E "Lab Origin CA|Rayo Cache Local CA" | head -1; }
+issuer() { echo Q | timeout 10 openssl s_client -proxy "${PX#http://}" -connect "$1" -servername "$2" 2>/dev/null | grep -o -E "Lab Origin CA|Celeris Cache Local CA" | head -1; }
 # Veces que el origen recibió esa ruta, sin la barra inicial: Git Bash la convertiría en una ruta de Windows.
 origin_hits() { curl -s --noproxy "*" "$ORIGIN_HTTP/__hits" | python3 -c "import json,sys; print(json.load(sys.stdin).get('/' + sys.argv[1], 0))" "$1"; }
 # Lanza $1 peticiones simultáneas a $2 y dice cuántas recibieron un 200.
@@ -148,9 +149,9 @@ startup_exit() { timeout 8 "$BIN" "config.$1.toml" > "$1.log" 2>&1; echo $?; }
 ca_can_sign_for() {
   openssl_literal req -newkey rsa:2048 -nodes -keyout leaf.key -out leaf.csr -subj "/CN=$1" 2>/dev/null
   printf "subjectAltName=DNS:%s\n" "$1" > leaf.cnf
-  openssl x509 -req -in leaf.csr -CA ca/rayo-ca.crt -CAkey ca/rayo-ca.key -CAcreateserial -out leaf.pem -days 1 -extfile leaf.cnf 2>/dev/null
-  if openssl verify -CAfile ca/rayo-ca.crt leaf.pem >/dev/null 2>&1; then echo si; else echo no; fi
-  rm -f leaf.key leaf.csr leaf.cnf leaf.pem ca/rayo-ca.srl
+  openssl x509 -req -in leaf.csr -CA ca/celeris-ca.crt -CAkey ca/celeris-ca.key -CAcreateserial -out leaf.pem -days 1 -extfile leaf.cnf 2>/dev/null
+  if openssl verify -CAfile ca/celeris-ca.crt leaf.pem >/dev/null 2>&1; then echo si; else echo no; fi
+  rm -f leaf.key leaf.csr leaf.cnf leaf.pem ca/celeris-ca.srl
 }
 
 section "1. HIT y MISS"
@@ -180,7 +181,7 @@ section "4. Intercepción selectiva"
 before_i=$(metric tls_intercepted); before_p=$(metric tls_passthrough)
 expect "dominio no listado pasa cifrado"     "Lab Origin CA"       "$(issuer 127.0.0.1:8443 127.0.0.1.nip.invalid)"
 expect "SNI no listado pasa cifrado"         "Lab Origin CA"       "$(issuer localhost:8443 otro.invalid)"
-expect "dominio listado se intercepta"       "Rayo Cache Local CA" "$(issuer localhost:8443 localhost)"
+expect "dominio listado se intercepta"       "Celeris Cache Local CA" "$(issuer localhost:8443 localhost)"
 expect "solo cuenta como interceptado el último" "$((before_i + 1))" "$(metric tls_intercepted)"
 expect "los otros dos cuentan como passthrough"  "$((before_p + 2))" "$(metric tls_passthrough)"
 
@@ -234,13 +235,13 @@ done
 expect "toda petición termina en un solo resultado" "$req" "$sum"
 
 section "Estadísticas del proxy principal"
-curl -s --noproxy "" -x "$PX" http://rayo.stats/; echo
+curl -s --noproxy "" -x "$PX" http://celeris.stats/; echo
 
 section "9. Clientes no permitidos"
 PX=http://127.0.0.1:3130
 expect "HTTP plano rechazado"                "403 -" "$(px http://localhost:8080/static.js)"
 expect "CONNECT rechazado"                   "403 -" "$(px $L/static.js)"
-expect "estadísticas rechazadas"             "403 -" "$(px http://rayo.stats/)"
+expect "estadísticas rechazadas"             "403 -" "$(px http://celeris.stats/)"
 
 section "10. Límite por IP"
 PX=http://127.0.0.1:3131
@@ -277,13 +278,13 @@ section "13. La CA está limitada y su llave protegida"
 expect "firma para un dominio configurado"   "si" "$(ca_can_sign_for localhost)"
 expect "firma para sus subdominios"          "si" "$(ca_can_sign_for sub.localhost)"
 expect "no sirve para otros dominios"        "no" "$(ca_can_sign_for banco.invalid)"
-expect "no puede crear otras CAs"            "1" "$(openssl x509 -in ca/rayo-ca.crt -noout -ext basicConstraints 2>/dev/null | grep -c 'pathlen:0')"
+expect "no puede crear otras CAs"            "1" "$(openssl x509 -in ca/celeris-ca.crt -noout -ext basicConstraints 2>/dev/null | grep -c 'pathlen:0')"
 if command -v icacls >/dev/null; then
-  acl=$(icacls ca/rayo-ca.key)
+  acl=$(icacls ca/celeris-ca.key)
   expect "solo un usuario puede leer la llave" "1" "$(echo "$acl" | grep -c ':(')"
   expect "con acceso de su dueño"            "1" "$(echo "$acl" | grep -c "${USERNAME}:(F)")"
 else
-  expect "solo el dueño puede leer la llave" "600" "$(stat -c %a ca/rayo-ca.key)"
+  expect "solo el dueño puede leer la llave" "600" "$(stat -c %a ca/celeris-ca.key)"
 fi
 
 section "14. Se niega a arrancar con una configuración insegura"
@@ -298,9 +299,9 @@ expect "y explica cómo resolverlo"           "1" "$(grep -c 'no puede firmar' f
 section "15. Aviso de transparencia"
 PX=http://127.0.0.1:3129
 before=$(metric requests)
-page=$(body http://rayo.aviso/)
-headers=$(curlx -o /dev/null -D - http://rayo.aviso/)
-fp=$(openssl x509 -in ca/rayo-ca.crt -noout -fingerprint -sha256 | cut -d= -f2 | tr -d '\r')
+page=$(body http://celeris.aviso/)
+headers=$(curlx -o /dev/null -D - http://celeris.aviso/)
+fp=$(openssl x509 -in ca/celeris-ca.crt -noout -fingerprint -sha256 | cut -d= -f2 | tr -d '\r')
 has() { if echo "$1" | grep -qF -- "$2"; then echo si; else echo no; fi; }
 # Líneas del registro con la IP de un cliente, sin los códigos de color del log.
 client_ip_lines() { sed 's/\x1b\[[0-9;]*m//g' "$1" | grep -cE '(^|[^a-z_])client(_addr)?='; }
@@ -316,16 +317,16 @@ expect "no cuenta como petición de contenido" "$before" "$(metric requests)"
 expect "el registro por defecto no incluye IPs de clientes" "0" "$(client_ip_lines e2e.log)"
 PX=http://127.0.0.1:3135
 px http://localhost:8080/static.js >/dev/null
-page=$(body http://rayo.aviso/)
+page=$(body http://celeris.aviso/)
 expect "con RUST_LOG=info el registro sí incluye IPs" "si" "$([ "$(client_ip_lines verbose.log)" -gt 0 ] && echo si || echo no)"
 expect "y entonces el aviso lo indica"       "si" "$(has "$page" 'Registro detallado: activado')"
 PX=http://127.0.0.1:3130
-expect "un cliente no permitido no puede verlo" "403 -" "$(px http://rayo.aviso/)"
+expect "un cliente no permitido no puede verlo" "403 -" "$(px http://celeris.aviso/)"
 PX=http://127.0.0.1:3133
-page=$(body http://rayo.aviso/)
+page=$(body http://celeris.aviso/)
 expect "sin dominios configurados no inventa datos" "si" "$(has "$page" '<p>Ninguno.</p>')"
 PX=http://127.0.0.1:3134
-page=$(body http://rayo.aviso/)
+page=$(body http://celeris.aviso/)
 expect "avisa si el registro detallado está activo" "si" "$(has "$page" 'Registro detallado: activado')"
 expect "escapa los datos de la configuración" "no" "$(has "$page" '<script>')"
 expect "y los muestra como texto"            "si" "$(has "$page" '&lt;script&gt;')"
@@ -366,29 +367,29 @@ expect "objeto grande llega entero"          "2500000" "$(curlx -o /dev/null -w 
 expect "túnel en passthrough"                "Lab Origin CA" "$(issuer 127.0.0.1:8443 127.0.0.1.nip.invalid)"
 expect "SNI distinto en passthrough"         "Lab Origin CA" "$(issuer localhost:8443 otro.invalid)"
 
-expect "cuenta los HIT"                      "1" "$(prom 'rayo_results_total{result="hit"}')"
-expect "cuenta las revalidaciones"           "1" "$(prom 'rayo_results_total{result="revalidated"}')"
-expect "mide la latencia de los HIT"         "1" "$(prom 'rayo_request_duration_seconds_count{result="hit"}')"
-expect "y la de los errores"                 "1" "$(prom 'rayo_request_duration_seconds_count{result="error"}')"
-expect "acumula el tiempo"                   "si" "$(over "$(prom 'rayo_request_duration_seconds_sum{result="miss"}')" 0)"
-expect "ratio de peticiones"                 "si" "$(over "$(prom rayo_request_hit_ratio)" 0)"
-expect "los túneles quedan contados"         "2" "$(prom 'rayo_tls_connections_total{mode="passthrough"}')"
-expect "el formato es el de Prometheus"      "0" "$(curl -s --noproxy "*" -H "Authorization: Bearer $TOKEN" "$ADMIN_URL/metrics" | tr -d '\r' | grep -cvE '^(# (HELP|TYPE) rayo_|rayo_[a-z_]+(\{[a-z]+="[^"]*"(,[a-z]+="[^"]*")*\})? [0-9.e+-]+$)')"
-expect "mide el disco"                       "si" "$(over "$(prom rayo_disk_used_bytes)" 0)"
-expect "cuenta los objetos"                  "si" "$(over "$(prom rayo_disk_objects)" 0)"
+expect "cuenta los HIT"                      "1" "$(prom 'celeris_results_total{result="hit"}')"
+expect "cuenta las revalidaciones"           "1" "$(prom 'celeris_results_total{result="revalidated"}')"
+expect "mide la latencia de los HIT"         "1" "$(prom 'celeris_request_duration_seconds_count{result="hit"}')"
+expect "y la de los errores"                 "1" "$(prom 'celeris_request_duration_seconds_count{result="error"}')"
+expect "acumula el tiempo"                   "si" "$(over "$(prom 'celeris_request_duration_seconds_sum{result="miss"}')" 0)"
+expect "ratio de peticiones"                 "si" "$(over "$(prom celeris_request_hit_ratio)" 0)"
+expect "los túneles quedan contados"         "2" "$(prom 'celeris_tls_connections_total{mode="passthrough"}')"
+expect "el formato es el de Prometheus"      "0" "$(curl -s --noproxy "*" -H "Authorization: Bearer $TOKEN" "$ADMIN_URL/metrics" | tr -d '\r' | grep -cvE '^(# (HELP|TYPE) celeris_|celeris_[a-z_]+(\{[a-z]+="[^"]*"(,[a-z]+="[^"]*")*\})? [0-9.e+-]+$)')"
+expect "mide el disco"                       "si" "$(over "$(prom celeris_disk_used_bytes)" 0)"
+expect "cuenta los objetos"                  "si" "$(over "$(prom celeris_disk_objects)" 0)"
 
 h=$(curl -s --noproxy "*" "$ORIGIN_HTTP/static.js" | sha)
 printf 'alterado' > "data-observed/objects/${h:0:2}/$h"
 expect "una copia corrupta se vuelve a pedir" "200 MISS" "$(px "$L/static.js?token=SECRETO-QUERY")"
-expect "cuenta los objetos corruptos"        "1" "$(prom rayo_corrupt_objects_total)"
+expect "cuenta los objetos corruptos"        "1" "$(prom celeris_corrupt_objects_total)"
 h=$(curl -s --noproxy "*" "$ORIGIN_HTTP/reflect" | sha)
 rm -rf "data-observed/objects/${h:0:2}"
 printf 'estorbo' > "data-observed/objects/${h:0:2}"
 expect "un fallo de escritura no afecta al cliente" "200 MISS" "$(px $L/reflect)"
-expect "y queda contado"                     "1" "$(prom rayo_store_write_errors_total)"
+expect "y queda contado"                     "1" "$(prom celeris_store_write_errors_total)"
 rm -f "data-observed/objects/${h:0:2}"
 
-expect "rayo.stats no publica el uso de disco"   "ausente" "$(metric disk_used_bytes)"
+expect "celeris.stats no publica el uso de disco"   "ausente" "$(metric disk_used_bytes)"
 expect "ni el tiempo encendido"                  "ausente" "$(metric uptime_secs)"
 expect "el token no aparece en el registro"      "0" "$(grep -c "$TOKEN" observed.log)"
 
@@ -411,7 +412,7 @@ expect "los bytes reales de un bypass en streaming" "1" "$(log_count observed 'l
 expect "los túneles, con su puerto"          "1" "$(log_count observed 'l["result"]=="tunnel" and l["method"]=="CONNECT" and l["port"]==8443 and l["bytes"] is None')"
 expect "y los que se deciden por el SNI"     "1" "$(log_count observed 'l["result"]=="tunnel" and l["host"]=="otro.invalid"')"
 expect "no registra las rutas de un bypass"  "0" "$(log_count observed 'l["result"]=="bypass" and l["path"] is not None')"
-expect "no registra las visitas a rayo.stats y rayo.aviso" "0" "$(log_count observed 'l["host"] in ("rayo.stats","rayo.aviso")')"
+expect "no registra las visitas a celeris.stats y celeris.aviso" "0" "$(log_count observed 'l["host"] in ("celeris.stats","celeris.aviso")')"
 expect "toda línea tiene un seudónimo de 16 caracteres" "0" "$(log_count observed 'len(l["client"])!=16')"
 expect "el mismo cliente tiene el mismo seudónimo" "1" "$(python3 -c 'import json,sys; print(len({json.loads(x)["client"] for x in open(sys.argv[1],encoding="utf-8")}))' "$LOG_FILE")"
 expect "no contiene parámetros"              "0" "$(log_text | grep -c 'SECRETO-QUERY')"
@@ -428,19 +429,19 @@ else
 fi
 expect "borra los logs vencidos"             "no" "$([ -e logs-observed/access-2020-01-01.jsonl ] && echo si || echo no)"
 expect "y no toca otros archivos"            "si" "$([ -e logs-observed/notas.txt ] && echo si || echo no)"
-page=$(body http://rayo.aviso/)
+page=$(body http://celeris.aviso/)
 expect "el aviso indica que está activo"     "si" "$(has "$page" 'Registro de acceso: activado')"
 expect "y explica lo que permite el seudónimo" "si" "$(has "$page" 'qué dominios visitó un mismo dispositivo')"
 expect "un log apagado no crea nada"         "no" "$([ -e logs-e2e ] && echo si || echo no)"
 PX=http://127.0.0.1:3129
-page=$(body http://rayo.aviso/)
+page=$(body http://celeris.aviso/)
 expect "y el aviso dice que está desactivado" "si" "$(has "$page" 'Registro de acceso: desactivado')"
 PX=http://127.0.0.1:3139
 px http://localhost:8080/static.js >/dev/null
 sleep 0.5
 expect "en modo anónimo se registra la petición" "1" "$(log_count anon 'l["result"]=="miss"')"
 expect "sin nada que distinga al cliente"    "0" "$(log_count anon 'l["client"] is not None')"
-page=$(body http://rayo.aviso/)
+page=$(body http://celeris.aviso/)
 expect "y el aviso lo dice, con su retención" "si" "$(has "$page" 'Se borra a los 3 días')"
 
 section "18. Se niega a arrancar si no puede cumplir lo configurado"
@@ -471,12 +472,12 @@ expect "objeto 5, que pasa del límite"       "200 MISS" "$(blob 5)"
 sleep 0.5
 expect "objeto 6"                            "200 MISS" "$(blob 6)"
 sleep 0.5
-expect "la caché no pasa de su límite"       "si" "$(not_over "$(prom rayo_disk_used_bytes)" 220000)"
-expect "cuenta lo expulsado"                 "si" "$(over "$(prom rayo_evicted_entries_total)" 0)"
-expect "los archivos coinciden con la cuenta" "$(prom rayo_disk_objects)" "$(find data-capped/objects -type f | wc -l | tr -d ' ')"
+expect "la caché no pasa de su límite"       "si" "$(not_over "$(prom celeris_disk_used_bytes)" 220000)"
+expect "cuenta lo expulsado"                 "si" "$(over "$(prom celeris_evicted_entries_total)" 0)"
+expect "los archivos coinciden con la cuenta" "$(prom celeris_disk_objects)" "$(find data-capped/objects -type f | wc -l | tr -d ' ')"
 expect "lo usado hace poco se conserva"      "200 HIT"  "$(blob 1)"
 expect "lo más antiguo salió"                "200 MISS" "$(blob 2)"
-expect "no es un fallo: no se activa ninguna alerta" "0" "$(prom 'rayo_alert{name="disk_limit"}')"
+expect "no es un fallo: no se activa ninguna alerta" "0" "$(prom 'celeris_alert{name="disk_limit"}')"
 
 PX=http://127.0.0.1:3129
 first=$(curl -s --noproxy "*" "$ORIGIN_HTTP/mutable" | sha)
@@ -492,7 +493,7 @@ expect "lo nuevo sí está"                    "si" "$([ -e "data-e2e/objects/${
 section "20. Reinicio"
 PX=http://127.0.0.1:3146
 sleep 1.5
-req_before=$(metric requests); used_before=$(prom rayo_disk_used_bytes); objects_before=$(prom rayo_disk_objects)
+req_before=$(metric requests); used_before=$(prom celeris_disk_used_bytes); objects_before=$(prom celeris_disk_objects)
 kill "$CAPPED_PID"
 sleep 1
 expect "los contadores quedaron en disco"    "si" "$(python3 -c 'import json,sys; print("si" if json.load(open(sys.argv[1]))["requests"]>0 else "no")' data-capped/stats.json)"
@@ -503,14 +504,14 @@ broken="data-capped/meta/dd/$(printf 'd%.0s' $(seq 1 64)).json"
 echo huerfano > "$orphan"; echo temporal > "$temp"; echo '{roto' > "$broken"; echo mio > data-capped/objects/cc/notas.txt
 launch_proxy capped 3146
 expect "los contadores siguen sumando"       "$req_before" "$(metric requests)"
-expect "la cuenta del disco es la misma"     "$used_before" "$(prom rayo_disk_used_bytes)"
-expect "y la de los objetos"                 "$objects_before" "$(prom rayo_disk_objects)"
+expect "la cuenta del disco es la misma"     "$used_before" "$(prom celeris_disk_used_bytes)"
+expect "y la de los objetos"                 "$objects_before" "$(prom celeris_disk_objects)"
 expect "lo guardado sigue sirviéndose"       "200 HIT" "$(blob 1)"
 expect "borra los objetos sin dueño"         "no" "$([ -e "$orphan" ] && echo si || echo no)"
 expect "los temporales de un corte"          "no" "$([ -e "$temp" ] && echo si || echo no)"
 expect "y los metadatos dañados"             "no" "$([ -e "$broken" ] && echo si || echo no)"
 expect "pero no los archivos ajenos"         "si" "$([ -e data-capped/objects/cc/notas.txt ] && echo si || echo no)"
-expect "los histogramas empiezan de cero"    "1" "$(prom 'rayo_request_duration_seconds_count{result="hit"}')"
+expect "los histogramas empiezan de cero"    "1" "$(prom 'celeris_request_duration_seconds_count{result="hit"}')"
 expect "las estadísticas públicas no cambian" "ausente" "$(metric evicted_entries)"
 
 section "21. Alertas"
@@ -524,19 +525,19 @@ wait_prom() {
   prom "$1"
 }
 ADMIN_URL=http://127.0.0.1:3149
-expect "avisa si la CA está por vencer"      "1" "$(wait_prom 'rayo_alert{name="ca_expiry"}' 1 4)"
-expect "o si queda poco espacio"             "1" "$(wait_prom 'rayo_alert{name="disk_space"}' 1 4)"
+expect "avisa si la CA está por vencer"      "1" "$(wait_prom 'celeris_alert{name="ca_expiry"}' 1 4)"
+expect "o si queda poco espacio"             "1" "$(wait_prom 'celeris_alert{name="disk_space"}' 1 4)"
 expect "deja constancia en el registro"      "si" "$(has "$(sed 's/\x1b\[[0-9;]*m//g' alerting.log)" 'alerta="ca_expiry"')"
 ADMIN_URL=http://127.0.0.1:3137
 PX=http://127.0.0.1:3136
-expect "sin problemas no se activa"          "0" "$(prom 'rayo_alert{name="ca_expiry"}')"
+expect "sin problemas no se activa"          "0" "$(prom 'celeris_alert{name="ca_expiry"}')"
 parallel 12 "http://localhost:1/x" >/dev/null
-expect "muchos errores del origen la activan" "1" "$(wait_prom 'rayo_alert{name="origin_errors"}' 1 8)"
-expect "y se apaga sola al pasar"            "0" "$(wait_prom 'rayo_alert{name="origin_errors"}' 0 15)"
+expect "muchos errores del origen la activan" "1" "$(wait_prom 'celeris_alert{name="origin_errors"}' 1 8)"
+expect "y se apaga sola al pasar"            "0" "$(wait_prom 'celeris_alert{name="origin_errors"}' 0 15)"
 h=$(curl -s --noproxy "*" "$ORIGIN_HTTP/static.js" | sha)
 printf 'alterado' > "data-observed/objects/${h:0:2}/$h"
 px "$L/static.js?token=SECRETO-QUERY" >/dev/null
-expect "un objeto corrupto la activa"        "1" "$(wait_prom 'rayo_alert{name="corrupt_objects"}' 1 4)"
+expect "un objeto corrupto la activa"        "1" "$(wait_prom 'celeris_alert{name="corrupt_objects"}' 1 4)"
 
 section "22. Panel y detalle por cliente"
 api() { curl -s --noproxy "*" -H "Authorization: Bearer $TOKEN" "$1"; }
@@ -554,7 +555,7 @@ expect "también por cliente"                 "401" "$(admin_status $ADMIN_URL/a
 expect "con el token responde"               "$(metric requests)" "$(api $ADMIN_URL/api/summary | field 'v["requests"]')"
 expect "e incluye las alertas"               "True" "$(api $ADMIN_URL/api/summary | field '"corrupt_objects" in [a["name"] for a in v["alerts"]]')"
 expect "apagado no guarda nada por cliente"  "False []" "$(api $ADMIN_URL/api/clients | field 'str(v["enabled"]) + " " + str(v["clients"])')"
-page=$(body http://rayo.aviso/)
+page=$(body http://celeris.aviso/)
 expect "y el aviso lo dice"                  "si" "$(has "$page" 'Totales por dispositivo: desactivados')"
 PX=http://127.0.0.1:3148
 ADMIN_URL=http://127.0.0.1:3149
@@ -566,7 +567,7 @@ expect "con la IP"                           "127.0.0.1" "$(api $ADMIN_URL/api/c
 expect "pero no qué sitios"                  "no" "$(has "$(api $ADMIN_URL/api/clients)" 'localhost')"
 sleep 1.5
 expect "y no se guarda en disco"             "0" "$(grep -c '127.0.0.1' data-alerting/stats.json)"
-page=$(body http://rayo.aviso/)
+page=$(body http://celeris.aviso/)
 expect "el aviso indica que está activo"     "si" "$(has "$page" 'Totales por dispositivo: activados')"
 
 section "23. Puertos de los túneles"
@@ -583,11 +584,11 @@ wait_over() {
 }
 connect_status() { curlx --max-time 10 -o /dev/null -w '%{http_connect}' "$1"; }
 detection() { api $ADMIN_URL/api/detections | field "[e[\"$2\"] for e in v[\"events\"] if e[\"kind\"]==\"$1\"][0]"; }
-expect "sin actividad inusual no hay avisos" "0" "$(prom 'rayo_alert{name="detections"}')"
+expect "sin actividad inusual no hay avisos" "0" "$(prom 'celeris_alert{name="detections"}')"
 expect "un puerto no permitido se rechaza"   "403" "$(connect_status https://localhost:25/)"
 expect "antes de resolver el nombre"         "403" "$(connect_status https://no-existe.invalid:25/)"
-expect "se cuenta como rechazo"              "2" "$(prom 'rayo_rejections_total{reason="port"}')"
-expect "y como aviso"                        "2" "$(prom 'rayo_detections_total{kind="rare_port"}')"
+expect "se cuenta como rechazo"              "2" "$(prom 'celeris_rejections_total{reason="port"}')"
+expect "y como aviso"                        "2" "$(prom 'celeris_detections_total{kind="rare_port"}')"
 expect "un puerto permitido sigue pasando"   "200 MISS" "$(px $L/static.js)"
 sleep 0.5
 expect "queda en el log de acceso"           "2" "$(log_count watcher 'l["result"]=="blocked" and l["port"]==25 and l["status"]==403')"
@@ -595,7 +596,7 @@ expect "sin lista de puertos no se rechaza"  "200" "$(PX=http://127.0.0.1:3152 c
 expect "una configuración sin límite lo advierte" "si" "$(has "$(sed 's/\x1b\[[0-9;]*m//g' unwatched.log)" 'allowed_connect_ports')"
 
 section "24. Nombres que no coinciden"
-mismatches() { prom 'rayo_detections_total{kind="host_mismatch"}'; }
+mismatches() { prom 'celeris_detections_total{kind="host_mismatch"}'; }
 expect "un Host normal no avisa"             "0" "$(px -H 'Host: LOCALHOST:8443' $L/static.js >/dev/null; mismatches)"
 expect "un Host ajeno no cambia el destino"  "200 HIT" "$(px -H 'Host: otra.invalid' $L/static.js)"
 expect "pero avisa"                          "1" "$(mismatches)"
@@ -611,17 +612,17 @@ expect "en un túnel sin interceptar no se puede saber" "3" "$(mismatches)"
 
 section "25. Volumen y rechazos por IP"
 for n in 1 2 3 4 5 6 7 8 9; do px "http://localhost:8080/blob/$n" >/dev/null; done
-expect "muchos bytes avisan"                 "si" "$(wait_over 'rayo_detections_total{kind="volume"}' 4)"
+expect "muchos bytes avisan"                 "si" "$(wait_over 'celeris_detections_total{kind="volume"}' 4)"
 expect "y dicen por qué, sin contar túneles" "si" "$(has "$(detection volume detail)" 'sin contar túneles')"
 for n in $(seq 1 41); do px http://localhost:8080/copia.js >/dev/null; done
 expect "muchas peticiones avisan"            "si" "$(has "$(detection volume detail)" '20 peticiones')"
 expect "con su propio conteo"                "si" "$(over "$(detection volume count)" 1)"
-expect "pocos rechazos no avisan"            "0" "$(prom 'rayo_detections_total{kind="denied"}')"
+expect "pocos rechazos no avisan"            "0" "$(prom 'celeris_detections_total{kind="denied"}')"
 for n in $(seq 1 11); do px http://localhost:8080/no-existe >/dev/null; done
-expect "muchos 404 avisan"                   "si" "$(wait_over 'rayo_detections_total{kind="denied"}' 4)"
+expect "muchos 404 avisan"                   "si" "$(wait_over 'celeris_detections_total{kind="denied"}' 4)"
 
 section "26. Quién ve las detecciones"
-expect "activan una alerta"                  "1" "$(wait_prom 'rayo_alert{name="detections"}' 1 4)"
+expect "activan una alerta"                  "1" "$(wait_prom 'celeris_alert{name="detections"}' 1 4)"
 line=$(sed 's/\x1b\[[0-9;]*m//g' watcher.log | grep 'alerta="detections"' | head -1)
 expect "que queda en el registro"            "si" "$(has "$line" 'avisos de actividad inusual')"
 expect "sin la IP"                           "no" "$(has "$line" '127.0.0.1')"
@@ -633,25 +634,25 @@ expect "pero no los sitios"                  "no no no" "$(has "$events" 'localh
 expect "ni la IP sale en el resumen"         "no" "$(has "$(api $ADMIN_URL/api/summary)" '127.0.0.1')"
 expect "ni en las métricas"                  "no" "$(has "$(curl -s --noproxy "*" -H "Authorization: Bearer $TOKEN" $ADMIN_URL/metrics)" '127.0.0.1')"
 expect "las estadísticas públicas no cambian" "ausente ausente" "$(metric blocked_ports) $(metric detections_volume)"
-page=$(body http://rayo.aviso/)
+page=$(body http://celeris.aviso/)
 expect "el aviso dice que están activas"     "si" "$(has "$page" 'Detección de actividad inusual: activada')"
 expect "y qué puertos se permiten"           "si" "$(has "$page" 'a estos puertos: 80, 443, 8443.')"
 
 sleep 1.5
-rare_before=$(prom 'rayo_detections_total{kind="rare_port"}')
+rare_before=$(prom 'celeris_detections_total{kind="rare_port"}')
 expect "en disco no queda la IP"             "0" "$(grep -c '127.0.0.1' data-watcher/stats.json)"
 kill "$WATCHER_PID"
 sleep 1
 launch_proxy watcher 3150
 expect "al reiniciar se olvidan las IPs"     "[]" "$(api $ADMIN_URL/api/detections | field 'v["events"]')"
-expect "y se conservan los totales"          "$rare_before" "$(prom 'rayo_detections_total{kind="rare_port"}')"
+expect "y se conservan los totales"          "$rare_before" "$(prom 'celeris_detections_total{kind="rare_port"}')"
 
 PX=http://127.0.0.1:3152
 ADMIN_URL=http://127.0.0.1:3153
 px -H 'Host: otra.invalid' http://localhost:8080/copia.js >/dev/null
 expect "apagadas no guardan nada"            "False []" "$(api $ADMIN_URL/api/detections | field 'str(v["enabled"]) + " " + str(v["events"])')"
 expect "ni cuentan"                          "0" "$(mismatches)"
-page=$(body http://rayo.aviso/)
+page=$(body http://celeris.aviso/)
 expect "y el aviso lo dice"                  "si" "$(has "$page" 'Detección de actividad inusual: desactivada')"
 expect "igual que los puertos abiertos"      "si" "$(has "$page" 'a cualquier puerto público')"
 
@@ -664,7 +665,7 @@ expect "el registro exige el token"          "401" "$(admin_status $ADMIN_URL/ap
 expect "y la gráfica también"                "401" "$(admin_status $ADMIN_URL/api/traffic)"
 px http://localhost:8080/copia.js >/dev/null
 expect "apagado no guarda nada"              "False []" "$(live | field 'str(v["enabled"]) + " " + str(v["entries"])')"
-expect "y el aviso lo dice"                  "si" "$(has "$(body http://rayo.aviso/)" 'Registro en vivo: desactivado')"
+expect "y el aviso lo dice"                  "si" "$(has "$(body http://celeris.aviso/)" 'Registro en vivo: desactivado')"
 PX=http://127.0.0.1:3154
 ADMIN_URL=http://127.0.0.1:3155
 expect "una petición nueva se descarga"      "200 MISS" "$(px "$L/static.js?secreto=abc123")"
@@ -683,7 +684,7 @@ sleep 0.3
 expect "los túneles también se ven"          "True" "$(live | field 'any(e["result"]=="tunnel" and e["host"]=="127.0.0.1" and e["port"]==8443 for e in v["entries"])')"
 expect "y tienen tamaño desconocido"         "None" "$(live | field '[e["bytes"] for e in v["entries"] if e["result"]=="tunnel"][0]')"
 expect "el resumen no muestra dominios"      "no" "$(has "$(api $ADMIN_URL/api/summary)" 'static.js')"
-page=$(body http://rayo.aviso/)
+page=$(body http://celeris.aviso/)
 expect "el aviso dice que está activo"       "si" "$(has "$page" 'Registro en vivo: activado')"
 expect "y que aparece la IP"                 "si" "$(has "$page" 'junto a tu IP')"
 sleep 7
@@ -706,7 +707,7 @@ px "$L/static.js" >/dev/null
 sleep 0.3
 expect "por defecto no muestra la IP"        "no" "$(has "$(live)" '127.0.0.1')"
 expect "sino un identificador"               "16" "$(live | field 'len(v["entries"][0]["client"])')"
-expect "y el aviso lo explica"               "si" "$(has "$(body http://rayo.aviso/)" 'Tu IP no aparece')"
+expect "y el aviso lo explica"               "si" "$(has "$(body http://celeris.aviso/)" 'Tu IP no aparece')"
 
 section "28. Log de seguridad"
 sec_count() { sleep 0.3; python3 - "$1" "$2" <<'PY'
@@ -717,10 +718,10 @@ PY
 }
 sec_text() { cat logs-"$1"/security-*.jsonl; }
 expect "apagado no crea el archivo"          "0" "$(ls logs-livehidden/security-* 2>/dev/null | wc -l | tr -d ' ')"
-expect "y el aviso lo dice"                  "si" "$(has "$(body http://rayo.aviso/)" 'Registro de seguridad: desactivado')"
+expect "y el aviso lo dice"                  "si" "$(has "$(body http://celeris.aviso/)" 'Registro de seguridad: desactivado')"
 PX=http://127.0.0.1:3158
 ADMIN_URL=http://127.0.0.1:3159
-expect "registra el arranque"                "1" "$(sec_count secured 'l["event"]=="startup" and l["app"]=="rayo-cache"')"
+expect "registra el arranque"                "1" "$(sec_count secured 'l["event"]=="startup" and l["app"]=="celeris-cache"')"
 px http://localhost:8080/copia.js >/dev/null
 px http://localhost:8080/copia.js >/dev/null
 expect "la navegación normal no se anota"    "no" "$(has "$(sec_text secured)" 'copia.js')"
@@ -746,7 +747,7 @@ for n in 1 2 3 4; do px http://localhost:8080/no-existe >/dev/null; done
 expect "muchos rechazos también"             "si" "$(over "$(sec_count secured 'l["event"]=="detection" and l["reason"]=="denied"')" 0)"
 sleep 1.5
 expect "una alerta del panel también"        "1" "$(sec_count secured 'l["event"]=="alert_raised" and l["reason"]=="ca_expiry"')"
-expect "el aviso dice que está activo"       "si" "$(has "$(body http://rayo.aviso/)" 'Registro de seguridad: activado')"
+expect "el aviso dice que está activo"       "si" "$(has "$(body http://celeris.aviso/)" 'Registro de seguridad: activado')"
 PX=http://127.0.0.1:3160
 denied_before=$(sec_count secdenied 'l["event"]=="client_denied"')
 expect "un cliente no permitido sigue fuera" "403 -" "$(px http://localhost:8080/copia.js)"
@@ -755,6 +756,9 @@ PX=http://127.0.0.1:3161
 for n in 1 2 3 4 5; do last=$(px http://localhost:8080/copia.js); done
 expect "el límite de peticiones sigue activo" "429 -" "$last"
 expect "y se anota"                          "si" "$(over "$(sec_count secrate 'l["event"]=="rate_limited"')" 0)"
+PX=http://127.0.0.1:3162
+expect "un nombre que apunta a la red interna" "502 -" "$(px http://localhost:8080/copia.js)"
+expect "también se anota, con su destino"    "1" "$(sec_count secclosed 'l["event"]=="destination_blocked" and l["host"]=="localhost" and l["dstport"]==8080 and l["srcip"]=="127.0.0.1"')"
 
 echo
 if [ "$FAILS" -eq 0 ]; then

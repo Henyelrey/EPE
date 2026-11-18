@@ -1,4 +1,4 @@
-//! Aviso de transparencia para los usuarios, servido en http://rayo.aviso/.
+//! Aviso de transparencia para los usuarios, servido en http://celeris.aviso/.
 //!
 //! Se genera al arrancar desde la configuración y el certificado reales, para que no pueda quedar
 //! desactualizado. Lo que dice sobre qué se registra debe cambiar junto con el código: si se agrega un
@@ -185,7 +185,7 @@ footer {{ margin-top: 3rem; color: var(--muted); font-size: .875rem; }}
 <code class="fingerprint">{fingerprint}</code>
 
 <h2>Cómo dejar de usarlo</h2>
-<p>Quita el proxy de la configuración de tu navegador o sistema y elimina el certificado <strong>Rayo Cache Local CA</strong> de tu dispositivo. Si solo quitas el proxy, el certificado seguirá instalado.</p>
+<p>Quita el proxy de la configuración de tu navegador o sistema y elimina el certificado <strong>Celeris Cache Local CA</strong> de tu dispositivo. Si solo quitas el proxy, el certificado seguirá instalado.</p>
 
 <footer>Este aviso se genera al arrancar el proxy a partir de su configuración y su certificado reales.</footer>
 </body>

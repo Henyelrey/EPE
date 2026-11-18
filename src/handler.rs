@@ -1,6 +1,6 @@
 //! Lógica del proxy: controla el acceso, decide qué descifrar, sirve HITs, guarda MISSes y revalida con ETag.
 
-use crate::access::{literal_ip, ClientDecision, ClientGate, DestinationPolicy, ResolveError};
+use crate::access::{blocked_destination, literal_ip, ClientDecision, ClientGate, DestinationPolicy, ResolveError};
 use crate::access_log::{AccessLog, Record};
 use crate::clients::ClientStats;
 use crate::coalesce::{Entry, FlightGuard, Flights};
@@ -38,7 +38,7 @@ pub struct Shared {
     pub detector: Arc<Detector>,
     pub live_log: Arc<LiveLog>,
     pub security: Arc<SecurityLog>,
-    /// Página de http://rayo.aviso/, generada al arrancar.
+    /// Página de http://celeris.aviso/, generada al arrancar.
     pub notice: Bytes,
 }
 
@@ -207,7 +207,7 @@ impl CacheHandler {
         let res = b
             .header(header::CONTENT_LENGTH, len)
             .header(header::AGE, age)
-            .header("x-rayo-cache", status)
+            .header("x-celeris-cache", status)
             .body(hold(Body::from(body), reservation))
             .ok()?;
         Stats::add(&self.shared.stats.bytes_from_cache, len as u64);
@@ -595,7 +595,7 @@ impl HttpHandler for CacheHandler {
 
         parts.headers.remove(header::TRANSFER_ENCODING);
         parts.headers.insert(header::CONTENT_LENGTH, HeaderValue::from(bytes.len()));
-        parts.headers.insert("x-rayo-cache", HeaderValue::from_static("MISS"));
+        parts.headers.insert("x-celeris-cache", HeaderValue::from_static("MISS"));
         Response::from_parts(parts, hold(Body::from(bytes), reservation))
     }
 
@@ -606,6 +606,17 @@ impl HttpHandler for CacheHandler {
             Exchange::Candidate(p) => Some(p.info.clone()),
         };
         if let Some(info) = info {
+            // Un nombre que apunta a la red interna se bloquea al resolverlo, sin llegar a conectarse.
+            if let Some(ip) = blocked_destination(&err) {
+                self.shared.security.record(SecurityEvent {
+                    event: "destination_blocked",
+                    srcip: Some(info.client),
+                    dstip: Some(ip),
+                    host: Some(&info.host),
+                    port: info.port,
+                    ..Default::default()
+                });
+            }
             Stats::inc(&self.shared.stats.origin_errors);
             info.finish(&self.shared, Outcome::OriginError, Some(502), None);
         }

@@ -1,4 +1,4 @@
-"""Origen de pruebas para la demostración: sirve un archivo cacheable en 127.0.0.1:8099."""
+"""Origen de pruebas para la demostración: sirve un archivo cacheable en 127.0.0.99:8099."""
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 BODY = b"console.log('archivo original de la demo');\n" * 50
@@ -17,4 +17,4 @@ class Handler(BaseHTTPRequestHandler):
         pass
 
 
-ThreadingHTTPServer(("127.0.0.1", 8099), Handler).serve_forever()
+ThreadingHTTPServer(("127.0.0.99", 8099), Handler).serve_forever()

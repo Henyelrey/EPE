@@ -2,7 +2,7 @@
 PARA QUIEN ADMINISTRA EL PROXY. Borra este bloque antes de repartir la hoja.
 
 1. Completa todo lo que está entre [corchetes].
-2. Compara la hoja con http://rayo.aviso/ : los dominios y la huella deben coincidir.
+2. Compara la hoja con http://celeris.aviso/ : los dominios y la huella deben coincidir.
 3. Entrégala ANTES de que alguien instale el certificado. Conserva constancia de quién aceptó.
 4. Actualízala si cambias los dominios o si empiezas a registrar más datos.
 
@@ -11,7 +11,7 @@ personas de una organización, revisa las normas que apliquen, como la Ley 29733
 de Datos Personales en Perú, o el RGPD si hay personas en la Unión Europea.
 -->
 
-# Aviso antes de usar el proxy rayo-cache
+# Aviso antes de usar el proxy celeris-cache
 
 **Responsable:** [nombre y forma de contacto]
 **Red o grupo:** [por ejemplo, laboratorio 3 del campus]
@@ -67,16 +67,16 @@ Si el responsable activa el registro detallado, el registro del proxy puede incl
 
 ## Cómo comprobarlo
 
-Con el proxy configurado, abre `http://rayo.aviso/`. Esa página se genera a partir de la configuración y el certificado reales, y muestra los dominios, qué registros están activos y la huella del certificado.
+Con el proxy configurado, abre `http://celeris.aviso/`. Esa página se genera a partir de la configuración y el certificado reales, y muestra los dominios, qué registros están activos y la huella del certificado.
 
 La huella SHA-256 debe ser:
 
-`[huella que muestra http://rayo.aviso/]`
+`[huella que muestra http://celeris.aviso/]`
 
 Para ver la del archivo que te dieron:
 
-- **Windows (PowerShell):** `(Get-PfxCertificate rayo-ca.crt).GetCertHashString('SHA256')`. Muestra la misma huella, sin los dos puntos.
-- **Linux o macOS:** `openssl x509 -in rayo-ca.crt -noout -fingerprint -sha256`
+- **Windows (PowerShell):** `(Get-PfxCertificate celeris-ca.crt).GetCertHashString('SHA256')`. Muestra la misma huella, sin los dos puntos.
+- **Linux o macOS:** `openssl x509 -in celeris-ca.crt -noout -fingerprint -sha256`
 
 Si no coincide, no instales el certificado y avisa al responsable.
 
@@ -85,10 +85,10 @@ Si no coincide, no instales el certificado y avisa al responsable.
 Hay que hacer las dos cosas. Si solo quitas el proxy, el certificado sigue instalado.
 
 1. **Quita el proxy** de la configuración de tu navegador o sistema.
-2. **Elimina el certificado** llamado **Rayo Cache Local CA**:
-   - **Windows (PowerShell como administrador):** `certutil -delstore ROOT "Rayo Cache Local CA"`
-   - **CachyOS o Arch:** `sudo trust anchor --remove rayo-ca.crt`
-   - **Debian o Ubuntu:** `sudo rm /usr/local/share/ca-certificates/rayo-ca.crt && sudo update-ca-certificates --fresh`
+2. **Elimina el certificado** llamado **Celeris Cache Local CA**:
+   - **Windows (PowerShell como administrador):** `certutil -delstore ROOT "Celeris Cache Local CA"`
+   - **CachyOS o Arch:** `sudo trust anchor --remove celeris-ca.crt`
+   - **Debian o Ubuntu:** `sudo rm /usr/local/share/ca-certificates/celeris-ca.crt && sudo update-ca-certificates --fresh`
    - **Firefox:** Ajustes → Privacidad y seguridad → Certificados → Ver certificados → Autoridades.
    - **Otros dispositivos:** [instrucciones o contacto del responsable]
 

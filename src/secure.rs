@@ -64,7 +64,7 @@ mod tests {
 
     #[test]
     fn crea_el_archivo_con_su_contenido() {
-        let dir = std::env::temp_dir().join(format!("rayo-secure-test-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("celeris-secure-test-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let path = dir.join("nuevo").join("secreto");
         write_private(&path, b"valor").unwrap();

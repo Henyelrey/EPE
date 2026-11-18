@@ -152,7 +152,7 @@ impl AccessLog {
         if cfg.access_log_retention_days == 0 {
             bail!("access_log_retention_days debe ser al menos 1");
         }
-        let tx = start_writer(&cfg.access_log_dir, "access", cfg.access_log_retention_days, stats.clone())?;
+        let tx = start_writer(&cfg.access_log_dir, "access", cfg.access_log_retention_days, false, stats.clone())?;
         let pseudonyms = match cfg.access_log_client_ip {
             ClientIpMode::Pseudonym => Some(Pseudonyms::new()),
             ClientIpMode::None => None,
@@ -189,20 +189,46 @@ impl AccessLog {
 }
 
 /// Prepara la carpeta y lanza la tarea que escribe un archivo `<prefijo>-<fecha>.jsonl` por día.
-pub fn start_writer(dir: &Path, prefix: &'static str, retention_days: u64, stats: Arc<Stats>) -> anyhow::Result<mpsc::Sender<String>> {
+///
+/// Con `prepare_next_day`, el archivo de mañana ya existe, vacío, antes de que empiece el día. Un SIEM
+/// tarda en descubrir un archivo nuevo y lo empieza a leer por el final: sin esto, Wazuh perdía las
+/// primeras líneas de cada día.
+pub fn start_writer(
+    dir: &Path,
+    prefix: &'static str,
+    retention_days: u64,
+    prepare_next_day: bool,
+    stats: Arc<Stats>,
+) -> anyhow::Result<mpsc::Sender<String>> {
     std::fs::create_dir_all(dir).with_context(|| format!("creando {}", dir.display()))?;
     let (tx, rx) = mpsc::channel(QUEUE_LINES);
-    tokio::spawn(write_loop(rx, dir.to_owned(), prefix, retention_days, stats));
+    tokio::spawn(write_loop(rx, dir.to_owned(), prefix, retention_days, prepare_next_day, stats));
     Ok(tx)
 }
 
-async fn write_loop(mut rx: mpsc::Receiver<String>, dir: PathBuf, prefix: &'static str, retention_days: u64, stats: Arc<Stats>) {
+async fn write_loop(
+    mut rx: mpsc::Receiver<String>,
+    dir: PathBuf,
+    prefix: &'static str,
+    retention_days: u64,
+    prepare_next_day: bool,
+    stats: Arc<Stats>,
+) {
     let mut current: Option<(u64, BufWriter<tokio::fs::File>)> = None;
-    // El primer tick es inmediato, y sigue purgando aunque no haya tráfico: la retención es una promesa.
+    // El primer tick es inmediato, y sigue actuando aunque no haya tráfico: la retención es una promesa,
+    // y un día sin eventos no debe dejar sin preparar el siguiente.
     let mut purge = tokio::time::interval(PURGE_EVERY);
     loop {
         tokio::select! {
-            _ = purge.tick() => purge_expired(&dir, prefix, retention_days).await,
+            _ = purge.tick() => {
+                purge_expired(&dir, prefix, retention_days).await;
+                if prepare_next_day {
+                    if let Err(e) = open_for_day(&dir, prefix, now() / SECS_PER_DAY + 1).await {
+                        Stats::inc(&stats.access_log_errors);
+                        tracing::warn!(error = %e, "no se pudo preparar el log de mañana");
+                    }
+                }
+            }
             line = rx.recv() => {
                 let Some(line) = line else { break };
                 write_line(&mut current, &dir, prefix, &line, &stats).await;
@@ -337,7 +363,7 @@ mod tests {
 
     #[tokio::test]
     async fn escribe_una_linea_json_por_peticion() {
-        let dir = std::env::temp_dir().join(format!("rayo-log-test-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("celeris-log-test-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let cfg = Config { access_log_enabled: true, access_log_dir: dir.clone(), ..Config::default() };
         let log = AccessLog::start(&cfg, Arc::new(Stats::default())).unwrap();
@@ -373,6 +399,7 @@ mod tests {
         assert_eq!(lines[1]["result"], "bypass");
         assert!(lines[1]["path"].is_null(), "la ruta de un contenido no público no se registra");
         assert!(!text.contains("192.168"));
+        assert!(!dir.join(file_name("access", now() / SECS_PER_DAY + 1)).exists(), "el log de acceso no prepara el día siguiente");
         drop(log);
         tokio::time::sleep(Duration::from_millis(50)).await;
         let _ = std::fs::remove_dir_all(&dir);
@@ -380,7 +407,7 @@ mod tests {
 
     #[tokio::test]
     async fn desactivado_no_crea_nada() {
-        let dir = std::env::temp_dir().join(format!("rayo-log-off-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("celeris-log-off-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let cfg = Config { access_log_dir: dir.clone(), ..Config::default() };
         assert!(!cfg.access_log_enabled, "el log de acceso debe venir apagado");

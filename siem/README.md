@@ -1,6 +1,6 @@
 # Demostración con Wazuh
 
-Levanta [Wazuh](https://wazuh.com/) 4.14.9 en Docker, le envía los eventos de seguridad de una instancia de `rayo-cache` y simula ataques para ver cómo aparecen.
+Levanta [Wazuh](https://wazuh.com/) 4.14.9 en Docker, le envía los eventos de seguridad de una instancia de `celeris-cache` y simula ataques para ver cómo aparecen.
 
 La demostración usa su propio proxy, en los puertos 3190 y 3191, con su propia caché y su propia CA. Tu proxy real no se toca.
 
@@ -8,7 +8,7 @@ La demostración usa su propio proxy, en los puertos 3190 y 3191, con su propia 
 
 - Docker Desktop en marcha, con al menos 4 GB de memoria disponibles para Docker.
 - Unos 10 GB libres en el disco de Docker. Las imágenes ocupan 7,5 GB.
-- Python, `git` y `curl.exe`. Si no existe `siem/demo/rayo-cache.exe`, también Rust para compilarlo.
+- Python, `git` y `curl.exe`. Si no existe `siem/demo/celeris-cache.exe`, también Rust para compilarlo.
 
 ## Uso
 
@@ -20,13 +20,13 @@ Ejecuta los comandos en PowerShell, desde la raíz del repositorio.
    .\siem\levantar.ps1
    ```
 
-2. Lanza los ataques simulados. Tarda unos 2 minutos y al final muestra las alertas.
+2. Lanza los ataques simulados. Tarda unos 3 minutos y al final muestra las alertas.
 
    ```powershell
    .\siem\simular-ataques.ps1
    ```
 
-3. Abre `https://localhost:5601` y entra con `INDEXER_USERNAME` e `INDEXER_PASSWORD` de `siem/wazuh-docker/single-node/docker-compose.yml`. Ve a **Threat Hunting > Events** y filtra con `rule.groups:rayo`. Para ver solo los ataques probables, usa `rule.groups:rayo and rule.level>=10`. **MITRE ATT&CK** agrupa las mismas alertas por técnica.
+3. Abre `https://localhost:5601` y entra con `INDEXER_USERNAME` e `INDEXER_PASSWORD` de `siem/wazuh-docker/single-node/docker-compose.yml`. Ve a **Threat Hunting > Events** y filtra con `rule.groups:celeris`. Para ver solo los ataques probables, usa `rule.groups:celeris and rule.level>=10`. **MITRE ATT&CK** agrupa las mismas alertas por técnica.
 
 4. Vuelve a ver las alertas desde la terminal cuando quieras:
 
@@ -62,13 +62,79 @@ Todo ocurre dentro de este PC. Las direcciones `127.0.0.x` hacen de otros equipo
 | Objeto de la caché alterado | Disco | `alert_raised` y revisión de integridad | 100171, 100183 | 13, 12 | T1565.001 |
 | Clave de la CA alterada | Disco | Revisión de integridad | 100180 | 14 | T1552.004 |
 | Configuración alterada | Disco | Revisión de integridad | 100182 | 10 | T1562.001 |
+| Token de administración alterado | Disco | Revisión de integridad | 100185 | 12 | T1098 |
+| Archivo nuevo en la carpeta de la CA | Disco | Revisión de integridad | 100186 | 10 | T1553.004 |
+| Objeto de la caché borrado y recreado | Disco | `alert_raised` y revisión de integridad | 100187, 100188 | 7, 12 | T1485, T1565.001 |
+
+## Atacar desde otra máquina de la red
+
+Con la demo encendida, exponla indicando la IP de este PC. Sin `-Permitir`, el proxy rechaza a cualquier otra máquina y anota el intento:
+
+```powershell
+.\siem\exponer-red.ps1 -Ip 172.20.46.51
+```
+
+Para probar ataques que exigen ser un cliente autorizado, como el escaneo de puertos, el SSRF o la inundación, añade la IP de la máquina atacante:
+
+```powershell
+.\siem\exponer-red.ps1 -Ip 172.20.46.51 -Permitir 172.20.46.80
+```
+
+Para probar desde cualquier IP privada, usa `-PermitirRedesPrivadas`. Permite `10.0.0.0/8`, `172.16.0.0/12` y `192.168.0.0/16` en el proxy y en el panel. Una IP pública sigue recibiendo 403, porque el proxy se niega a arrancar con `0.0.0.0/0`. Con esta opción, ninguna IP privada genera `client_denied`, así que las reglas 100110 y 100111 solo saltan con IP públicas.
+
+```powershell
+.\siem\exponer-red.ps1 -Ip 172.20.46.51 -PermitirRedesPrivadas
+```
+
+El script no cambia el firewall de Windows. Si es la primera vez, muestra el comando que debes ejecutar como administrador para abrir el puerto 3190.
+
+| Puerto | Qué hay | Quién llega | IP que ve Wazuh |
+|---|---|---|---|
+| 3191 | Apache delante del panel de la demo | Solo la subred de esa IP | Real, por el registro de Apache. Las alertas del propio panel muestran `127.0.0.1`, que es Apache |
+| 3190 | El proxy, sin Apache: Apache no puede reenviar peticiones de un proxy de reenvío sin ocultar la IP del cliente | Cualquiera que el firewall deje pasar. Quien no esté permitido recibe 403 | Real |
+| 5601 | Panel de Wazuh | Solo este PC | No aplica |
+
+Para cerrar la exposición, ejecuta `.\siem\exponer-red.ps1 -Cerrar`. `detener.ps1` también apaga Apache, y `levantar.ps1` siempre arranca la demo solo en este PC.
+
+Límites al exponerla:
+
+- **Panel sin cifrar:** el token viaja en claro por la red. Es el de la demo, y nunca debe usarse el del proxy real.
+- **Ataques de red:** Wazuh solo los ve si activas el registro del firewall. Consulta "Detectar ataques de red".
+- **Red compartida:** ataca solo este PC. Si la red es de una institución, confirma antes que se permiten estas pruebas. Algunas redes Wi-Fi también aíslan a los clientes entre sí.
+
+## Detectar ataques de red
+
+Un escaneo o una inundación no llegan a formar una petición HTTP, así que el proxy no los anota. Estas reglas leen el registro del firewall de Windows, que `firewall_a_json.py` convierte a JSON mientras la demo está expuesta.
+
+Activa el registro una sola vez, en un PowerShell de administrador, y vuelve a ejecutar `exponer-red.ps1`. Para revertirlo, añade `-Desactivar`:
+
+```powershell
+.\siem\activar-registro-firewall.ps1
+```
+
+| Ataque | Qué detecta | Regla de Wazuh | Nivel | MITRE ATT&CK |
+|---|---|---|---|---|
+| Escaneo con Nmap | 15 puertos distintos desde una IP en 30 s | 100198 | 12 | T1046 |
+| Escaneo sigiloso con Nmap | 5 paquetes FIN, NULL o Xmas descartados en 30 s | 100199 | 12 | T1046 |
+| Sondeo de versiones con Nmap | 12 conexiones a 3190 desde una IP en 10 s | 100200 | 7 | T1046 |
+| DoS | 100 conexiones a 3190 desde una IP en 10 s | 100201 | 12 | T1498 |
+| DDoS | 10 IP distintas contra 3190 en 10 s | 100202 | 14 | T1498 |
+| Ping de la muerte | Un ICMP descartado de 10 000 bytes o más | 100203 | 13 | T1499.004 |
+| Ping flood o ping fragmentado | 20 paquetes ICMP desde una IP en 10 s | 100204 | 10 | T1498.001 |
+
+Límites de estas reglas:
+
+- **Escaneo de un solo puerto:** `nmap -p 3190` hace una sola conexión, igual que un cliente normal, y no genera alerta. Las reglas 100198 y 100199 ven el escaneo de varios puertos, y la 100200 solo ve los sondeos con varias conexiones, como `-sV` o `-A`.
+- **Ping de la muerte:** ICMP no usa puertos, así que la regla vigila el equipo y no el puerto 3190. El firewall solo anota el tamaño de los paquetes que descarta, y Windows actual no es vulnerable a este ataque. Según cómo anote los fragmentos, se verá en la 100203, en la 100204 o en ninguna.
+- **DoS lento:** un ataque como Slowloris abre pocas conexiones y no alcanza el umbral.
+- **Topes del conversor:** anota hasta 200 paquetes por IP y 1000 en total cada 10 segundos, para no saturar a Wazuh. Por eso, las alertas indican que hubo un ataque, pero no su volumen real.
 
 ## Cómo está montado
 
-- **Log de seguridad:** el proxy escribe `siem/demo/logs/security-AAAA-MM-DD.jsonl`, una línea JSON por evento. La sección "Log de seguridad para un SIEM" del [README principal](../README.md) describe cada evento.
-- **Lectura:** el manager de Wazuh lee esa carpeta montada en `/var/rayo`. Las reglas están en [`wazuh/local_rules.xml`](wazuh/local_rules.xml).
+- **Log de seguridad:** el proxy escribe `siem/demo/logs/security-AAAA-MM-DD.jsonl`, una línea JSON por evento. El archivo de mañana ya existe, vacío: Wazuh tarda hasta un minuto en descubrir un archivo nuevo y lo empieza a leer por el final, así que sin esto perdería las primeras líneas de cada día. La sección "Log de seguridad para un SIEM" del [README principal](../README.md) describe cada evento.
+- **Lectura:** el manager de Wazuh lee esa carpeta montada en `/var/celeris`. Las reglas están en [`wazuh/local_rules.xml`](wazuh/local_rules.xml).
 - **Integridad:** Wazuh revisa cada 30 segundos la CA, la configuración y los objetos de la caché. En esta demo es una revisión periódica, así que un cambio tarda hasta 30 segundos en aparecer.
-- **Red:** [`compose.rayo.yml`](compose.rayo.yml) publica únicamente el panel, y solo en `127.0.0.1`. Los archivos oficiales de Wazuh se descargan en `siem/wazuh-docker/`.
+- **Red:** [`compose.celeris.yml`](compose.celeris.yml) publica únicamente el panel, y solo en `127.0.0.1`. Los archivos oficiales de Wazuh se descargan en `siem/wazuh-docker/`.
 
 ## Límites de esta demostración
 
@@ -76,7 +142,7 @@ Esta configuración no sirve para producción:
 
 - **Contraseñas por defecto:** son públicas. Antes de exponer Wazuh, sigue la guía oficial para [cambiarlas](https://documentation.wazuh.com/current/deployment-options/docker/wazuh-container.html).
 - **Manager y proxy en el mismo PC:** en producción, instala un agente de Wazuh en la máquina del proxy y mantén el manager aparte. La CA real no debe montarse en otro servicio.
-- **Direcciones simuladas:** las `127.0.0.x` imitan otros equipos. Un ataque real desde la red necesitaría que el proxy escuche en esa red y que `allowed_clients` lo permita.
+- **Direcciones simuladas:** en `simular-ataques.ps1`, las `127.0.0.x` imitan otros equipos. Para atacar desde otro equipo de verdad, consulta "Atacar desde otra máquina de la red".
 - **Atacante con control del PC:** podría borrar el log antes de que Wazuh lo lea. Un agente reduce ese margen, porque envía los eventos en cuanto aparecen.
 - **Sin análisis de vulnerabilidades:** está desactivado porque descarga una base de datos de unos 11 GB y aquí no hay agentes que analizar.
 - **Sin bloqueo automático:** Wazuh avisa, pero no bloquea. Tampoco hay bloqueo de IPs en el puerto de administración, así que el token debe seguir siendo largo y aleatorio.
@@ -84,7 +150,7 @@ Esta configuración no sirve para producción:
 
 ## Activarlo en tu proxy real
 
-Añade estas líneas al principio de `config.toml` y reinicia el proxy. El aviso de `http://rayo.aviso/` pasará a indicar que el registro está activo, y debes actualizar también tu [aviso a los usuarios](../docs/AVISO.md), porque este log guarda la IP real.
+Añade estas líneas al principio de `config.toml` y reinicia el proxy. El aviso de `http://celeris.aviso/` pasará a indicar que el registro está activo, y debes actualizar también tu [aviso a los usuarios](../docs/AVISO.md), porque este log guarda la IP real.
 
 ```toml
 security_log_enabled = true

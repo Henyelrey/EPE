@@ -486,7 +486,7 @@ mod tests {
     }
 
     fn temp_root(name: &str) -> PathBuf {
-        let root = std::env::temp_dir().join(format!("rayo-store-{name}-{}", std::process::id()));
+        let root = std::env::temp_dir().join(format!("celeris-store-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         root
     }

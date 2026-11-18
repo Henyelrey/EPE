@@ -4,6 +4,7 @@ use crate::config::Config;
 use crate::store::now;
 use anyhow::{bail, Context};
 use std::collections::HashMap;
+use std::fmt;
 use std::io;
 use std::net::{IpAddr, SocketAddr};
 use std::str::FromStr;
@@ -159,10 +160,35 @@ pub enum ResolveError {
 impl From<ResolveError> for io::Error {
     fn from(e: ResolveError) -> Self {
         match e {
-            ResolveError::Blocked(ip) => io::Error::new(io::ErrorKind::PermissionDenied, format!("destino interno bloqueado: {ip}")),
+            ResolveError::Blocked(ip) => io::Error::new(io::ErrorKind::PermissionDenied, BlockedDestination(ip)),
             ResolveError::Lookup(e) => e,
         }
     }
+}
+
+#[derive(Debug)]
+struct BlockedDestination(IpAddr);
+
+impl fmt::Display for BlockedDestination {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "destino interno bloqueado: {}", self.0)
+    }
+}
+
+impl std::error::Error for BlockedDestination {}
+
+/// Busca en la cadena de un error de conexión si el motivo fue un destino interno bloqueado. El resolutor
+/// no sabe qué cliente lo pidió: quien recibe el error es quien puede anotarlo.
+pub fn blocked_destination(error: &(dyn std::error::Error + 'static)) -> Option<IpAddr> {
+    let mut current = Some(error);
+    while let Some(e) = current {
+        let inner = e.downcast_ref::<io::Error>().and_then(io::Error::get_ref);
+        if let Some(BlockedDestination(ip)) = inner.and_then(|i| i.downcast_ref()) {
+            return Some(*ip);
+        }
+        current = e.source();
+    }
+    None
 }
 
 /// Decide a qué direcciones puede conectarse el proxy en nombre de un cliente.
@@ -298,5 +324,30 @@ mod tests {
         assert!(matches!(closed.resolve("127.0.0.1", 80).await, Err(ResolveError::Blocked(_))));
         assert!(matches!(closed.resolve("localhost", 80).await, Err(ResolveError::Blocked(_))));
         assert_eq!(closed.resolve("8.8.8.8", 443).await.unwrap(), vec![listen("8.8.8.8:443")]);
+    }
+
+    #[derive(Debug)]
+    struct Wrapped(io::Error);
+
+    impl fmt::Display for Wrapped {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            write!(f, "no se pudo conectar")
+        }
+    }
+
+    impl std::error::Error for Wrapped {
+        fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+            Some(&self.0)
+        }
+    }
+
+    #[test]
+    fn reconoce_un_destino_bloqueado_dentro_de_un_error_de_conexion() {
+        let blocked = Wrapped(ResolveError::Blocked(ip("10.0.0.1")).into());
+        assert_eq!(blocked_destination(&blocked), Some(ip("10.0.0.1")));
+        let denied = Wrapped(io::Error::new(io::ErrorKind::PermissionDenied, "lo rechazó el sistema"));
+        assert_eq!(blocked_destination(&denied), None, "otro permiso denegado no es un destino bloqueado");
+        let lookup = Wrapped(ResolveError::Lookup(io::Error::other("sin DNS")).into());
+        assert_eq!(blocked_destination(&lookup), None);
     }
 }

@@ -1,7 +1,7 @@
-//! rayo-cache: proxy de caché local con intercepción TLS selectiva.
+//! celeris-cache: proxy de caché local con intercepción TLS selectiva.
 //!
-//! Uso:  rayo-cache [ruta/config.toml]
-//! Luego configura 127.0.0.1:3128 como proxy HTTP y HTTPS e instala ca/rayo-ca.crt
+//! Uso:  celeris-cache [ruta/config.toml]
+//! Luego configura 127.0.0.1:3128 como proxy HTTP y HTTPS e instala ca/celeris-ca.crt
 //! en el almacén de confianza de TUS dispositivos.
 
 mod access;
@@ -32,7 +32,7 @@ use tracing_subscriber::EnvFilter;
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
-        .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| "rayo_cache=info,hudsucker=warn".into()))
+        .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| "celeris_cache=info,hudsucker=warn".into()))
         .init();
 
     let cfg_path = std::env::args().nth(1).map(PathBuf::from).unwrap_or_else(|| "config.toml".into());
@@ -50,8 +50,8 @@ async fn main() -> anyhow::Result<()> {
     let connector = upstream::connector(&cfg.upstream_extra_ca, destinations.clone(), stats.clone())?;
 
     // Hudsucker anota la IP del cliente en sus spans de nivel INFO: con un filtro como RUST_LOG=info,
-    // esa IP acompaña a cada línea del registro aunque rayo-cache no esté en modo debug.
-    let detailed_logs = tracing::enabled!(target: "rayo_cache", tracing::Level::DEBUG)
+    // esa IP acompaña a cada línea del registro aunque celeris-cache no esté en modo debug.
+    let detailed_logs = tracing::enabled!(target: "celeris_cache", tracing::Level::DEBUG)
         || tracing::enabled!(target: "hudsucker::proxy::internal", tracing::Level::INFO);
     let ca_summary = ca::summary(&cfg.ca_cert)?;
     let notice = notice::render(&cfg, &ca_summary, detailed_logs).into();

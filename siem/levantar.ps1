@@ -14,17 +14,8 @@ if (-not (Test-Path $SingleNode)) {
 foreach ($dir in 'data', 'logs', 'ca') {
     New-Item -ItemType Directory -Force (Join-Path $Demo $dir) | Out-Null
 }
-$config = Join-Path $Demo 'config.toml'
-if (-not (Test-Path $config)) { Copy-Item (Join-Path $Siem 'demo-proxy.toml') $config }
 
-# La configuración oficial, con las revisiones de archivos limitadas a los de la demo y el log del proxy.
-$official = [IO.File]::ReadAllText((Join-Path $SingleNode 'config\wazuh_cluster\wazuh_manager.conf'))
-$syscheck = [IO.File]::ReadAllText((Join-Path $Siem 'wazuh\rayo-syscheck.xml'))
-$localfile = [IO.File]::ReadAllText((Join-Path $Siem 'wazuh\rayo-localfile.xml'))
-$merged = [regex]::Replace($official, '(?s)[ \t]*<syscheck>.*?</syscheck>\r?\n', { param($m) $syscheck }) + "`n" + $localfile
-# La base de vulnerabilidades ocupa unos 11 GB y esta demo no tiene agentes que analizar.
-$merged = $merged -replace '(<vulnerability-detection>\s*<enabled>)yes', '$1no'
-[IO.File]::WriteAllText((Join-Path $Demo 'ossec.conf'), ($merged -replace "`r`n", "`n"), (New-Object Text.UTF8Encoding $false))
+Write-OssecConf
 
 if (-not (Test-Path (Join-Path $SingleNode 'config\wazuh_indexer_ssl_certs\root-ca.pem'))) {
     Write-Host 'Generando los certificados internos de Wazuh...'
@@ -32,27 +23,21 @@ if (-not (Test-Path (Join-Path $SingleNode 'config\wazuh_indexer_ssl_certs\root-
     if ($LASTEXITCODE -ne 0) { Fail "No se pudieron generar los certificados. Revisa $Demo\certs.log" }
 }
 
-$binary = Join-Path $Demo 'rayo-cache.exe'
+$binary = Join-Path $Demo 'celeris-cache.exe'
 if (-not (Test-Path $binary)) {
     Write-Host 'Compilando el proxy. La primera vez tarda unos minutos...'
     # Carpeta propia: la compilación normal falla si tu proxy real está en marcha.
     $target = Join-Path $Demo 'target'
     & cargo build --release --manifest-path (Join-Path $Repo 'Cargo.toml') --target-dir $target
     if ($LASTEXITCODE -ne 0) { Fail 'No se pudo compilar el proxy.' }
-    Copy-Item (Join-Path $target 'release\rayo-cache.exe') $binary
+    Copy-Item (Join-Path $target 'release\celeris-cache.exe') $binary
 }
 
 if (-not (Test-ProxyRunning)) {
     Write-Host "Arrancando el proxy de demostración en $Proxy..."
-    $process = Start-Process $binary -ArgumentList 'config.toml' -WorkingDirectory $Demo -WindowStyle Hidden -PassThru `
-        -RedirectStandardOutput (Join-Path $Demo 'proxy.out') -RedirectStandardError (Join-Path $Demo 'proxy.err')
-    Set-Content (Join-Path $Demo 'proxy.pid') $process.Id
-    Start-Sleep 2
-    if ($process.HasExited) { Fail "El proxy no arrancó. Revisa $Demo\proxy.err" }
-
-    $process = Start-Process python -ArgumentList "`"$(Join-Path $Siem 'origen_demo.py')`"" -WindowStyle Hidden -PassThru `
-        -RedirectStandardOutput (Join-Path $Demo 'origen.out') -RedirectStandardError (Join-Path $Demo 'origen.err')
-    Set-Content (Join-Path $Demo 'origen.pid') $process.Id
+    Write-DemoConfig
+    Start-DemoProxy
+    Start-DemoOrigin
 }
 
 Write-Host 'Levantando Wazuh...'

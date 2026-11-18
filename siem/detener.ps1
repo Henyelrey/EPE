@@ -2,6 +2,8 @@
 param([switch]$Borrar)
 . (Join-Path $PSScriptRoot 'comun.ps1')
 
+Stop-DemoProcess 'apache'
+Stop-DemoProcess 'firewall'
 Stop-DemoProcess 'proxy'
 Stop-DemoProcess 'origen'
 

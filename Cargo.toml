@@ -1,5 +1,5 @@
 [package]
-name = "rayo-cache"
+name = "celeris-cache"
 version = "0.1.0"
 edition = "2021"
 description = "Proxy de caché HTTP/HTTPS local con intercepción TLS selectiva (Hudsucker + rustls + Hyper + Tokio)"

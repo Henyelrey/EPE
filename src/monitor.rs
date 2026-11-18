@@ -169,13 +169,13 @@ impl Monitor {
 
     pub fn prometheus(&self) -> String {
         let active = self.active();
-        let mut out = String::from("# HELP rayo_alert 1 si la alerta está activa.\n# TYPE rayo_alert gauge\n");
+        let mut out = String::from("# HELP celeris_alert 1 si la alerta está activa.\n# TYPE celeris_alert gauge\n");
         for name in ALERT_NAMES {
             let on = u8::from(active.iter().any(|a| a.name == name));
-            let _ = writeln!(out, "rayo_alert{{name=\"{name}\"}} {on}");
+            let _ = writeln!(out, "celeris_alert{{name=\"{name}\"}} {on}");
         }
-        let _ = writeln!(out, "# HELP rayo_ca_not_after_seconds Fecha de vencimiento de la CA.\n# TYPE rayo_ca_not_after_seconds gauge");
-        let _ = writeln!(out, "rayo_ca_not_after_seconds {}", self.ca_not_after);
+        let _ = writeln!(out, "# HELP celeris_ca_not_after_seconds Fecha de vencimiento de la CA.\n# TYPE celeris_ca_not_after_seconds gauge");
+        let _ = writeln!(out, "celeris_ca_not_after_seconds {}", self.ca_not_after);
         out
     }
 
@@ -343,9 +343,9 @@ mod tests {
         let monitor = Monitor::new(123);
         monitor.update(vec![Alert { name: "ca_expiry", message: "x".into() }]);
         let text = monitor.prometheus();
-        assert!(text.contains("rayo_alert{name=\"ca_expiry\"} 1\n"));
-        assert!(text.contains("rayo_alert{name=\"disk_space\"} 0\n"));
-        assert!(text.contains("rayo_ca_not_after_seconds 123\n"));
+        assert!(text.contains("celeris_alert{name=\"ca_expiry\"} 1\n"));
+        assert!(text.contains("celeris_alert{name=\"disk_space\"} 0\n"));
+        assert!(text.contains("celeris_ca_not_after_seconds 123\n"));
         monitor.update(vec![]);
         assert!(monitor.active().is_empty());
     }
@@ -359,7 +359,7 @@ mod tests {
 
     #[tokio::test]
     async fn los_contadores_sobreviven_a_un_reinicio() {
-        let dir = std::env::temp_dir().join(format!("rayo-monitor-test-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("celeris-monitor-test-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
 

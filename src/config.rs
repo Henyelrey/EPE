@@ -47,9 +47,9 @@ pub struct Config {
     pub strip_query_prefixes: Vec<String>,
     /// Reglas tipo Store-ID: normalizan URLs distintas que apuntan al mismo contenido.
     pub store_id: Vec<StoreIdRule>,
-    /// Host virtual que devuelve estadísticas en JSON: http://rayo.stats/
+    /// Host virtual que devuelve estadísticas en JSON: http://celeris.stats/
     pub stats_host: String,
-    /// Host virtual con el aviso de transparencia para los usuarios: http://rayo.aviso/
+    /// Host virtual con el aviso de transparencia para los usuarios: http://celeris.aviso/
     pub notice_host: String,
     /// Cómo contactar a quien administra el proxy. Se muestra en el aviso.
     pub operator_contact: String,
@@ -144,8 +144,8 @@ impl Default for Config {
             max_buffered_bytes: 512 * 1024 * 1024,
             coalesce_wait_secs: 10,
             data_dir: "./data".into(),
-            ca_cert: "./ca/rayo-ca.crt".into(),
-            ca_key: "./ca/rayo-ca.key".into(),
+            ca_cert: "./ca/celeris-ca.crt".into(),
+            ca_key: "./ca/celeris-ca.key".into(),
             max_object_bytes: 64 * 1024 * 1024,
             default_ttl_secs: 3600,
             mem_index_entries: 200_000,
@@ -171,10 +171,10 @@ impl Default for Config {
                 // Ejemplo: espejos numerados de un mismo CDN → una sola clave.
                 host_suffix: "dl.sourceforge.net".into(),
                 pattern: r"^https?://[^/]+\.dl\.sourceforge\.net/(.*)$".into(),
-                replace: "https://dl.sourceforge.net.rayo/$1".into(),
+                replace: "https://dl.sourceforge.net.celeris/$1".into(),
             }],
-            stats_host: "rayo.stats".into(),
-            notice_host: "rayo.aviso".into(),
+            stats_host: "celeris.stats".into(),
+            notice_host: "celeris.aviso".into(),
             operator_contact: String::new(),
             upstream_extra_ca: vec![],
             admin_listen: "127.0.0.1:9128".into(),
